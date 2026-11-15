@@ -3,8 +3,8 @@
 //! only by base URL, model name, API key and a few request extras.
 
 use async_trait::async_trait;
-use capri_application::ports::{LanguageModel, LlmError, TokenStream};
-use capri_domain::{Message, Role};
+use capri_application::ports::{LanguageModel, LlmError, Piece, PieceStream, TokenStream, ToolSpec};
+use capri_domain::{Message, Role, ToolCall};
 use futures::StreamExt;
 use serde::Deserialize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,6 +33,9 @@ pub struct OpenAiConfig {
     pub thinking: bool,
     /// Extra JSON merged into every request body, for server-specific options.
     pub extra: Option<serde_json::Value>,
+    /// Offer her tools to the model (native tool calling). Servers that refuse them are noticed
+    /// and get plain chat from then on.
+    pub tools: bool,
 }
 
 impl OpenAiConfig {
@@ -45,6 +48,7 @@ impl OpenAiConfig {
             max_tokens: Some(400),
             thinking: false,
             extra: None,
+            tools: true,
         }
     }
 
@@ -67,6 +71,8 @@ pub struct OpenAiCompatible {
     /// Set once the model has been seen thinking although thinking was turned off (some servers
     /// ignore the switch): from then on every request leaves room for it.
     thinks: Arc<AtomicBool>,
+    /// Set once the server refused the `tools` field (llama-server without `--jinja`...).
+    no_tools: Arc<AtomicBool>,
 }
 
 #[derive(Deserialize)]
@@ -104,6 +110,27 @@ struct Delta {
     /// llama-server, vLLM and DeepSeek put a reasoning model's thinking here.
     #[serde(default, alias = "reasoning")]
     reasoning_content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<CallDelta>>,
+}
+
+/// A piece of a tool call; the arguments arrive a few characters at a time.
+#[derive(Deserialize, Default)]
+struct CallDelta {
+    #[serde(default)]
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<FnDelta>,
+}
+
+#[derive(Deserialize, Default)]
+struct FnDelta {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 /// What the stream carried besides visible text, to explain an empty answer.
@@ -119,6 +146,8 @@ struct Tally {
     error: Option<String>,
     /// The start of the raw body, for a server that ignored `stream: true` and for diagnostics.
     head: String,
+    /// Tool calls being assembled, by index.
+    calls: Vec<ToolCall>,
 }
 
 impl Tally {
@@ -141,6 +170,31 @@ impl Tally {
             )),
             _ => LlmError::Backend(format!("empty reply (finish: {})", self.finish.as_deref().unwrap_or("none"))),
         }
+    }
+
+    /// The tool calls the reply carried (streamed, or in a whole completion).
+    fn tool_calls(&self) -> Vec<ToolCall> {
+        let mut calls: Vec<ToolCall> = self.calls.iter().filter(|c| !c.name.trim().is_empty()).cloned().collect();
+        if calls.is_empty() && self.events == 0 {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(self.head.trim()) {
+                if let Some(list) = v["choices"][0]["message"]["tool_calls"].as_array() {
+                    for (i, c) in list.iter().enumerate() {
+                        let args = &c["function"]["arguments"];
+                        calls.push(ToolCall {
+                            id: c["id"].as_str().map_or_else(|| format!("call_{i}"), str::to_string),
+                            name: c["function"]["name"].as_str().unwrap_or_default().to_string(),
+                            arguments: args.as_str().map_or_else(|| args.to_string(), str::to_string),
+                        });
+                    }
+                }
+            }
+        }
+        for (i, c) in calls.iter_mut().enumerate() {
+            if c.id.is_empty() {
+                c.id = format!("call_{i}");
+            }
+        }
+        calls
     }
 
     /// A server that ignored `stream: true` sends one plain JSON completion: take its text.
@@ -174,6 +228,23 @@ fn absorb(data: &str, tally: &mut Tally, think: &mut ThinkFilter) -> Option<Stri
         if let Some(t) = c.delta.content {
             text.push_str(&t);
         }
+        for d in c.delta.tool_calls.unwrap_or_default() {
+            while tally.calls.len() <= d.index {
+                tally.calls.push(ToolCall { id: String::new(), name: String::new(), arguments: String::new() });
+            }
+            let call = &mut tally.calls[d.index];
+            if let Some(id) = d.id.filter(|i| !i.is_empty()) {
+                call.id = id;
+            }
+            if let Some(f) = d.function {
+                if let Some(n) = f.name {
+                    call.name.push_str(&n);
+                }
+                if let Some(a) = f.arguments {
+                    call.arguments.push_str(&a);
+                }
+            }
+        }
         if c.finish_reason.is_some() {
             tally.finish = c.finish_reason;
         }
@@ -191,7 +262,13 @@ impl OpenAiCompatible {
     pub fn new(cfg: OpenAiConfig) -> Self {
         let http =
             reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(5)).build().unwrap_or_default();
-        Self { cfg, http, resolved: Arc::new(OnceCell::new()), thinks: Arc::new(AtomicBool::new(false)) }
+        Self {
+            cfg,
+            http,
+            resolved: Arc::new(OnceCell::new()),
+            thinks: Arc::new(AtomicBool::new(false)),
+            no_tools: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     pub fn config(&self) -> &OpenAiConfig {
@@ -254,8 +331,42 @@ async fn check(resp: reqwest::Response) -> Result<reqwest::Response, LlmError> {
     })
 }
 
+/// One message as the chat completions API wants it.
+fn wire(m: &Message) -> serde_json::Value {
+    let role = match m.role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+    };
+    let mut v = serde_json::json!({ "role": role, "content": m.content });
+    if !m.tool_calls.is_empty() {
+        v["tool_calls"] = m
+            .tool_calls
+            .iter()
+            .map(|c| {
+                serde_json::json!({ "id": c.id, "type": "function", "function": { "name": c.name, "arguments": c.arguments } })
+            })
+            .collect();
+    }
+    if let Some(id) = &m.tool_call_id {
+        v["tool_call_id"] = id.clone().into();
+    }
+    v
+}
+
 /// The request body. Pure, so the exact shape sent to each server is unit-tested.
 pub fn build_body(cfg: &OpenAiConfig, model: &str, messages: &[Message]) -> serde_json::Value {
+    build_body_with_tools(cfg, model, messages, &[])
+}
+
+/// [`build_body`] offering `tools` to the model.
+pub fn build_body_with_tools(
+    cfg: &OpenAiConfig,
+    model: &str,
+    messages: &[Message],
+    tools: &[ToolSpec],
+) -> serde_json::Value {
     let mut messages: Vec<Message> = messages.to_vec();
     // Qwen3 reads a `/no_think` switch in the user turn, on any server: the portable way to skip
     // its reasoning when the server has no option for it.
@@ -264,7 +375,16 @@ pub fn build_body(cfg: &OpenAiConfig, model: &str, messages: &[Message]) -> serd
             last.content.push_str("\n\n/no_think");
         }
     }
-    let mut body = serde_json::json!({ "model": model, "messages": messages, "stream": true });
+    let wired: Vec<serde_json::Value> = messages.iter().map(wire).collect();
+    let mut body = serde_json::json!({ "model": model, "messages": wired, "stream": true });
+    if !tools.is_empty() {
+        body["tools"] = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({ "type": "function", "function": { "name": t.name, "description": t.description, "parameters": t.parameters } })
+            })
+            .collect();
+    }
     if let Some(t) = cfg.temperature {
         body["temperature"] = t.into();
     }
@@ -293,7 +413,7 @@ impl LanguageModel for OpenAiCompatible {
     async fn stream(&self, messages: &[Message]) -> Result<TokenStream, LlmError> {
         let model = self.model().await?;
         let budget = self.budget();
-        let (first, tally) = self.open(&model, messages, budget).await?;
+        let (first, tally) = self.open(&model, messages, budget, &[]).await?;
         let this = self.clone();
         let messages = messages.to_vec();
         // after the stream: nothing to add if she said something; otherwise either retry with room to
@@ -323,7 +443,7 @@ impl LanguageModel for OpenAiCompatible {
             if thought_out && !this.cfg.thinking && !this.thinks.swap(true, Ordering::Relaxed) {
                 let bigger = this.budget();
                 tracing::info!(model = %model, budget = ?bigger, "the model thinks even with thinking off, retrying with room for it");
-                return match this.open(&model, &messages, bigger).await {
+                return match this.open(&model, &messages, bigger, &[]).await {
                     Ok((retry, t2)) => retry.chain(explain_if_empty(t2, bigger)).boxed(),
                     Err(e) => futures::stream::once(async move { Err(e) }).boxed(),
                 };
@@ -332,6 +452,89 @@ impl LanguageModel for OpenAiCompatible {
         })
         .flatten();
         Ok(Box::pin(first.chain(tail)))
+    }
+
+    fn supports_tools(&self) -> bool {
+        self.cfg.tools && !self.no_tools.load(Ordering::Relaxed)
+    }
+
+    async fn respond(&self, messages: &[Message], tools: &[ToolSpec]) -> Result<PieceStream, LlmError> {
+        if tools.is_empty() || !self.supports_tools() {
+            return self.plain(messages).await;
+        }
+        let model = self.model().await?;
+        let budget = self.budget();
+        let (first, tally) = match self.open(&model, messages, budget, tools).await {
+            Ok(opened) => opened,
+            Err(LlmError::Backend(why)) if refuses_tools(&why) => {
+                tracing::warn!(model = %model, reason = %why, "the server refused tools: plain chat from now on (llama-server needs --jinja for tools)");
+                self.no_tools.store(true, Ordering::Relaxed);
+                return self.plain(messages).await;
+            }
+            Err(e) => return Err(e),
+        };
+        let this = self.clone();
+        let (messages, tools) = (messages.to_vec(), tools.to_vec());
+        let tail = futures::stream::once(async move {
+            let (said, calls, thought_out, whole, error) = {
+                let t = tally.lock().unwrap_or_else(PoisonError::into_inner);
+                let thought_out = t.reasoning_chars + t.hidden_chars > 0 && t.finish.as_deref() == Some("length");
+                (t.said, t.tool_calls(), thought_out, t.whole_reply(), t.empty_reply(budget))
+            };
+            if !calls.is_empty() || said {
+                let calls: Vec<Result<Piece, LlmError>> = calls.into_iter().map(|c| Ok(Piece::Call(c))).collect();
+                return futures::stream::iter(calls).boxed();
+            }
+            if let Some(text) = whole {
+                return futures::stream::once(async move { Ok(Piece::Text(text)) }).boxed();
+            }
+            if thought_out && !this.cfg.thinking && !this.thinks.swap(true, Ordering::Relaxed) {
+                let bigger = this.budget();
+                return match this.open(&model, &messages, bigger, &tools).await {
+                    Ok((retry, t2)) => retry.map(|r| r.map(Piece::Text)).chain(calls_or_explain(t2, bigger)).boxed(),
+                    Err(e) => futures::stream::once(async move { Err(e) }).boxed(),
+                };
+            }
+            futures::stream::once(async move { Err(error) }).boxed()
+        })
+        .flatten();
+        Ok(Box::pin(first.map(|r| r.map(Piece::Text)).chain(tail)))
+    }
+}
+
+/// An error that means "this server doesn't do tool calling".
+fn refuses_tools(why: &str) -> bool {
+    let w = why.to_lowercase();
+    (w.starts_with("400") || w.starts_with("422") || w.starts_with("500") || w.starts_with("501"))
+        && (w.contains("tool") || w.contains("jinja") || w.contains("function"))
+}
+
+/// Ends a tool-calling stream with its calls, or an explanation when it carried nothing at all.
+fn calls_or_explain(tally: Shared, max_tokens: Option<u32>) -> BoxStream<'static, Result<Piece, LlmError>> {
+    futures::stream::once(async move {
+        let t = tally.lock().unwrap_or_else(PoisonError::into_inner);
+        let calls = t.tool_calls();
+        if !calls.is_empty() {
+            return futures::stream::iter(calls.into_iter().map(|c| Ok(Piece::Call(c))).collect::<Vec<_>>()).boxed();
+        }
+        if t.said {
+            return futures::stream::empty().boxed();
+        }
+        if let Some(text) = t.whole_reply() {
+            return futures::stream::once(async move { Ok(Piece::Text(text)) }).boxed();
+        }
+        let e = t.empty_reply(max_tokens);
+        futures::stream::once(async move { Err(e) }).boxed()
+    })
+    .flatten()
+    .boxed()
+}
+
+impl OpenAiCompatible {
+    /// Text only, as pieces.
+    async fn plain(&self, messages: &[Message]) -> Result<PieceStream, LlmError> {
+        let text = self.stream(messages).await?;
+        Ok(Box::pin(text.map(|r| r.map(Piece::Text))))
     }
 }
 
@@ -350,9 +553,10 @@ impl OpenAiCompatible {
         model: &str,
         messages: &[Message],
         max_tokens: Option<u32>,
+        tools: &[ToolSpec],
     ) -> Result<(BoxStream<'static, Result<String, LlmError>>, Shared), LlmError> {
         let cfg = OpenAiConfig { max_tokens, ..self.cfg.clone() };
-        let body = build_body(&cfg, model, messages);
+        let body = build_body_with_tools(&cfg, model, messages, tools);
         let resp = self
             .auth(self.http.post(self.url("chat/completions")).json(&body))
             .send()
@@ -482,6 +686,54 @@ mod tests {
         ]);
         assert_eq!(text, "Salut choom");
         assert!(t.said);
+    }
+
+    #[test]
+    fn tool_calls_are_assembled_from_pieces() {
+        let (text, t) = run(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"spotify","arguments":""}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"action\":"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"next\"}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+        ]);
+        assert_eq!(text, "");
+        let calls = t.tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!((calls[0].id.as_str(), calls[0].name.as_str()), ("call_a", "spotify"));
+        assert_eq!(calls[0].arguments, r#"{"action":"next"}"#);
+    }
+
+    #[test]
+    fn tools_and_tool_turns_go_out_in_the_api_shape() {
+        let spec = ToolSpec {
+            name: "spotify".into(),
+            description: "music".into(),
+            parameters: serde_json::json!({"type": "object"}),
+            risk: capri_domain::Risk::Reversible,
+        };
+        let call = ToolCall { id: "c1".into(), name: "spotify".into(), arguments: "{}".into() };
+        let msgs = vec![
+            Message::system("s"),
+            Message::user("next"),
+            Message::calling("", vec![call]),
+            Message::tool_result("c1", "done"),
+        ];
+        let body = build_body_with_tools(&OpenAiConfig::new("http://x/v1"), "m", &msgs, &[spec]);
+        assert_eq!(body["tools"][0]["function"]["name"], "spotify");
+        assert_eq!(body["messages"][2]["tool_calls"][0]["function"]["arguments"], "{}");
+        assert_eq!(body["messages"][3]["role"], "tool");
+        assert_eq!(body["messages"][3]["tool_call_id"], "c1");
+        assert!(refuses_tools("500 Internal Server Error: tools param requires --jinja flag"));
+        assert!(!refuses_tools("503: loading model"));
+    }
+
+    #[test]
+    fn whole_completions_carry_tool_calls_too() {
+        let t = Tally {
+            head: r#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"x","type":"function","function":{"name":"ui_windows","arguments":"{}"}}]}}]}"#.into(),
+            ..Tally::default()
+        };
+        assert_eq!(t.tool_calls()[0].name, "ui_windows");
     }
 
     #[test]
