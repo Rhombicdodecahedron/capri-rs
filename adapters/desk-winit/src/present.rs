@@ -38,7 +38,6 @@ pub fn native_id(window: &Window) -> u64 {
     }
 }
 
-#[allow(clippy::needless_pass_by_value)] // consumed by softbuffer, only borrowed on Windows
 /// The pointer position in screen pixels, where the OS can tell (Windows).
 pub fn os_cursor() -> Option<(f32, f32)> {
     #[cfg(windows)]
@@ -51,6 +50,7 @@ pub fn os_cursor() -> Option<(f32, f32)> {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)] // consumed by softbuffer, only borrowed on Windows
 pub fn create(window: Arc<Window>) -> Box<dyn Presenter> {
     #[cfg(windows)]
     {

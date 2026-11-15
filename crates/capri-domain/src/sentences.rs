@@ -94,7 +94,7 @@ mod tests {
     #[test]
     fn waits_for_the_space_after_the_dot() {
         let mut s = SentenceSplitter::default();
-        assert!(s.feed("This is the end.").is_empty());
+        assert_eq!(s.feed("This is the end."), Vec::<String>::new());
         assert_eq!(s.feed(" Next"), ["This is the end."]);
     }
 
