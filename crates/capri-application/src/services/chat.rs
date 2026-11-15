@@ -15,7 +15,35 @@ pub enum ChatEvent {
     Thinking,
     Delta(String),
     Done(String),
-    Failed(String),
+    Failed(ChatFailure),
+}
+
+/// Why a reply failed, so each front end can say it in its own words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatFailure {
+    pub kind: FailureKind,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureKind {
+    /// Nothing answered at the configured address.
+    Unreachable,
+    /// The server refused the key or the sign-in.
+    SignedOut,
+    /// The server answered with an error, or the reply broke off.
+    Backend,
+}
+
+impl From<&LlmError> for ChatFailure {
+    fn from(e: &LlmError) -> Self {
+        let kind = match e {
+            LlmError::Unreachable(_) => FailureKind::Unreachable,
+            LlmError::SignedOut(_) => FailureKind::SignedOut,
+            LlmError::Backend(_) | LlmError::Interrupted(_) => FailureKind::Backend,
+        };
+        Self { kind, detail: e.to_string() }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -128,7 +156,7 @@ impl ChatService {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!(error = %e, model = %self.model_name(), "reply failed");
-                emit(ChatEvent::Failed(e.to_string()));
+                emit(ChatEvent::Failed(ChatFailure::from(&e)));
                 return;
             }
         };

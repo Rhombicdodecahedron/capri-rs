@@ -188,7 +188,7 @@ async fn terminal_chat(chat: Arc<ChatService>) -> anyhow::Result<()> {
                     println!("capri > {full}");
                 }
             }
-            ChatEvent::Failed(err) => println!("[brain offline] {err}"),
+            ChatEvent::Failed(err) => println!("[brain offline] {}", err.detail),
         })
         .await;
     }

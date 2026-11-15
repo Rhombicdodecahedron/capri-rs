@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use capri_application::ports::{Skin, SkinRepository};
-use capri_application::services::{ChatEvent, ChatService, DeskService};
+use capri_application::services::{ChatEvent, ChatService, DeskService, FailureKind};
 use capri_domain::{CharacterConfig, Language, Point, Rect};
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -262,7 +262,25 @@ impl ApplicationHandler<UiEvent> for App {
             UiEvent::Chat(ChatEvent::Thinking) => {}
             UiEvent::Chat(ChatEvent::Delta(d)) => s.bubble.push_reply(&d),
             UiEvent::Chat(ChatEvent::Done(full)) => s.bubble.finish(full, now),
-            UiEvent::Chat(ChatEvent::Failed(e)) => s.bubble.fail(e, now),
+            UiEvent::Chat(ChatEvent::Failed(f)) => {
+                tracing::warn!(detail = %f.detail, "reply failed");
+                let l = s.painter.lang;
+                let text = match f.kind {
+                    FailureKind::Unreachable => l.pick(
+                        "I can't reach my brain. Right-click me to check the server in the settings.",
+                        "Je n'arrive pas à joindre mon cerveau. Clic droit sur moi pour vérifier le serveur dans les réglages.",
+                    ),
+                    FailureKind::SignedOut => l.pick(
+                        "My brain refused the key. Right-click me to fix it in the settings.",
+                        "Mon cerveau refuse la clé. Clic droit sur moi pour la corriger dans les réglages.",
+                    ),
+                    FailureKind::Backend => l.pick(
+                        "My brain glitched on that one. Try again?",
+                        "Mon cerveau a buggé sur celle-là. On réessaie ?",
+                    ),
+                };
+                s.bubble.fail(text.to_string(), now);
+            }
         }
     }
 

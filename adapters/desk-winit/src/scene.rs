@@ -120,11 +120,7 @@ impl Painter {
                 ("CAPRI", format!("{}{dots}", l.pick("jacking in", "connexion")), rgb(NEON_CYAN, 220))
             }
             BubbleState::Saying { text, .. } => ("CAPRI", text.clone(), rgb((0xe6, 0xf7, 0xff), 255)),
-            BubbleState::Error(e) => (
-                l.pick("SYSTEM", "SYSTÈME"),
-                format!("{} {e}", l.pick("brain offline:", "cerveau hors ligne :")),
-                rgb(NEON_RED, 255),
-            ),
+            BubbleState::Error(e) => (l.pick("BRAIN OFFLINE", "CERVEAU HORS LIGNE"), e.clone(), rgb(NEON_RED, 255)),
         };
 
         let max_w = (self.layout.width as f32 - 16.0).min(360.0 * k);

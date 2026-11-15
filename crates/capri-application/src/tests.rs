@@ -115,7 +115,7 @@ async fn model_failure_is_reported_not_logged() {
     let memory = Arc::new(VecMemory::default());
     let chat = ChatService::new(Arc::new(FailingModel), memory.clone(), ChatSettings::default());
     let events = run(&chat, "hi").await;
-    assert!(matches!(events.last(), Some(ChatEvent::Failed(_))));
+    assert!(matches!(events.last(), Some(ChatEvent::Failed(f)) if f.kind == FailureKind::Unreachable));
     assert_eq!(memory.log.lock().await.len(), 0);
 }
 
