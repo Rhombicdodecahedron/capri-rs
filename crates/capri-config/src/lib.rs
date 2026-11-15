@@ -17,6 +17,99 @@ pub struct Config {
     pub safety: Safety,
     pub memory: MemorySection,
     pub ui: Ui,
+    pub voice: Voice,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Voice {
+    /// Hold this key anywhere to talk to her, e.g. `F8`, `Ctrl+Alt+Space`.
+    pub push_to_talk: String,
+    /// Read her replies out loud (needs a text-to-speech engine).
+    pub speak_replies: bool,
+    pub volume: f32,
+    pub stt: SpeechToTextSection,
+    pub tts: TextToSpeechSection,
+}
+
+impl Default for Voice {
+    fn default() -> Self {
+        Self {
+            push_to_talk: "F8".into(),
+            speak_replies: true,
+            volume: 1.0,
+            stt: SpeechToTextSection::default(),
+            tts: TextToSpeechSection::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SttEngine {
+    #[default]
+    Off,
+    /// whisper.cpp on this PC (needs a build with `--features whisper-local`).
+    WhisperLocal,
+    /// Any `/v1/audio/transcriptions` server: a self-hosted Whisper, OpenAI...
+    Openai,
+    Elevenlabs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TtsEngine {
+    #[default]
+    Off,
+    Elevenlabs,
+    /// Any `/v1/audio/speech` server: OpenAI, Kokoro-FastAPI...
+    Openai,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SpeechToTextSection {
+    pub engine: SttEngine,
+    /// `fr`, `en`... Empty: detect it.
+    pub language: String,
+    /// whisper-local: path to a ggml model file (empty: the downloaded one).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_path: Option<PathBuf>,
+    /// whisper-local: tiny | base | small | medium, used to find or download the model.
+    pub model_size: String,
+    /// openai: server URL with /v1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Model name on the server (`whisper-1`, `scribe_v1`...); empty: the engine's default.
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TextToSpeechSection {
+    pub engine: TtsEngine,
+    /// ElevenLabs voice id, or the OpenAI-style voice name (`nova`, `af_bella`...).
+    pub voice: String,
+    /// Empty: the engine's default (`eleven_flash_v2_5`, `gpt-4o-mini-tts`).
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
+/// An API key from its environment variable first, then from the file.
+pub fn resolve_key(env: Option<&str>, inline: Option<&str>) -> Result<Option<String>, String> {
+    if let Some(var) = env.filter(|v| !v.trim().is_empty()) {
+        return std::env::var(var).map(Some).map_err(|_| format!("the environment variable {var} is not set"));
+    }
+    Ok(inline.filter(|k| !k.trim().is_empty()).map(str::to_string))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -290,6 +383,25 @@ approval = "ask"
 [ui]
 # auto | en | fr  (she always answers in the language you write in)
 language = "auto"
+
+[voice]
+# hold this key anywhere to talk to her
+push_to_talk = "F8"
+speak_replies = true
+volume = 1.0
+
+[voice.stt]
+# off | whisper-local | openai | elevenlabs
+engine = "off"
+language = "fr"
+model_size = "base"
+model = ""
+
+[voice.tts]
+# off | elevenlabs | openai
+engine = "off"
+voice = ""
+model = ""
 "#;
 
 #[cfg(test)]
