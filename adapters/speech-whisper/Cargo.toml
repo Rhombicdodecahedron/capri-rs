@@ -1,0 +1,25 @@
+[package]
+name = "capri-speech-whisper"
+description = "SpeechToText on this PC with whisper.cpp (whisper-rs). Built only with the `whisper` feature."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# compiles whisper.cpp: needs CMake and a C++ compiler
+whisper = ["dep:whisper-rs"]
+cuda = ["whisper", "whisper-rs/cuda"]
+vulkan = ["whisper", "whisper-rs/vulkan"]
+
+[dependencies]
+capri-application = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+whisper-rs = { version = "0.16", optional = true }
+
+[lints]
+workspace = true

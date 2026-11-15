@@ -11,6 +11,9 @@ members = [
     "adapters/memory-sqlite",
     "adapters/desk-winit",
     "adapters/settings-egui",
+    "adapters/audio-cpal",
+    "adapters/speech-cloud",
+    "adapters/speech-whisper",
     "apps/capri",
 ]
 
@@ -32,6 +35,9 @@ capri-desktop-windows = { path = "adapters/desktop-windows" }
 capri-memory-sqlite = { path = "adapters/memory-sqlite" }
 capri-desk-winit = { path = "adapters/desk-winit" }
 capri-settings-egui = { path = "adapters/settings-egui" }
+capri-audio-cpal = { path = "adapters/audio-cpal" }
+capri-speech-cloud = { path = "adapters/speech-cloud" }
+capri-speech-whisper = { path = "adapters/speech-whisper" }
 
 anyhow = "1"
 async-trait = "0.1"
@@ -44,7 +50,7 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "multipart"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 winit = "0.30"
@@ -52,6 +58,7 @@ softbuffer = "0.4"
 tiny-skia = "0.11"
 ab_glyph = "0.2"
 directories = "5"
+hound = "3.5"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
