@@ -1,0 +1,14 @@
+[package]
+name = "capri-domain"
+description = "Capri's pure domain: character state machine, animation timing, ledges, conversation, approval policy. No I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+
+[lints]
+workspace = true

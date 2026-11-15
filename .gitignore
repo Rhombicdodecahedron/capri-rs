@@ -1,0 +1,7 @@
+/target
+*.png.tmp
+preview.png
+/data
+capri.toml
+.DS_Store
+Thumbs.db
