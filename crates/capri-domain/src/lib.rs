@@ -13,6 +13,7 @@ pub mod geometry;
 pub mod intent;
 pub mod language;
 pub mod ledge;
+pub mod media;
 pub mod rng;
 pub mod sentences;
 
@@ -25,5 +26,6 @@ pub use geometry::{Point, Rect};
 pub use intent::Intent;
 pub use language::Language;
 pub use ledge::{Ledge, LedgeId, LedgeKind};
+pub use media::MediaCommand;
 pub use rng::Rng;
 pub use sentences::SentenceSplitter;
