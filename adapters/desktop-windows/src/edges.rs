@@ -35,9 +35,8 @@ pub fn visible_edges(windows: &[WindowRect], areas: &[Rect], min_width: f32) -> 
         }
         for (k, (l, r)) in pieces.into_iter().enumerate() {
             if r - l >= min_width {
-                // pieces of one window share its id only for the first piece; later pieces get a derived id
-                let id = if k == 0 { w.id } else { w.id ^ ((k as u64) << 56) };
-                out.push(Ledge { id: LedgeId::Window(id), kind: LedgeKind::Window, left: l, right: r, y });
+                let id = LedgeId::window_piece(w.id, k.min(255) as u8);
+                out.push(Ledge { id, kind: LedgeKind::Window, left: l, right: r, y });
             }
         }
     }

@@ -8,10 +8,29 @@ use crate::geometry::Point;
 /// window that moves and notice one that closes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LedgeId {
+    /// A window's top edge. The low 56 bits are the window handle; the top byte numbers the visible
+    /// pieces of an edge split by windows above it. See [`LedgeId::window_piece`].
     Window(u64),
     Icon(u32),
     /// The bottom of the work area of monitor `n`.
     Floor(u32),
+}
+
+const PIECE_SHIFT: u32 = 56;
+
+impl LedgeId {
+    /// Piece `piece` of the top edge of window `handle`.
+    pub fn window_piece(handle: u64, piece: u8) -> Self {
+        LedgeId::Window((handle & ((1 << PIECE_SHIFT) - 1)) | (u64::from(piece) << PIECE_SHIFT))
+    }
+
+    /// The window this ledge belongs to, if it is a window edge.
+    pub fn window_handle(self) -> Option<u64> {
+        match self {
+            LedgeId::Window(id) => Some(id & ((1 << PIECE_SHIFT) - 1)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +100,16 @@ mod tests {
     fn landing_ignores_edges_not_under_her() {
         let ledges = [window(1, 200.0, 300.0, 250.0)];
         assert!(landing(&ledges, 50.0, 0.0, 400.0).is_none());
+    }
+
+    #[test]
+    fn pieces_of_one_window_share_its_handle() {
+        let a = LedgeId::window_piece(0x1234, 0);
+        let b = LedgeId::window_piece(0x1234, 2);
+        assert_ne!(a, b);
+        assert_eq!(a.window_handle(), Some(0x1234));
+        assert_eq!(b.window_handle(), Some(0x1234));
+        assert_eq!(LedgeId::Floor(0).window_handle(), None);
     }
 
     #[test]

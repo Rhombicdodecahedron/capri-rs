@@ -4,7 +4,7 @@
 
 use std::ffi::c_void;
 
-use capri_application::ports::DesktopProbe;
+use capri_application::ports::{DesktopProbe, Tracking};
 use capri_domain::{Ledge, Rect};
 use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, RECT, TRUE};
 use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
@@ -121,5 +121,12 @@ impl DesktopProbe for Win32Desktop {
         let mut ledges = visible_edges(&windows, &areas, self.min_width);
         ledges.extend(crate::floors(&areas));
         ledges
+    }
+
+    fn track(&self, window: u64) -> Tracking {
+        match usable(window as HWND) {
+            Some(rect) => Tracking::At(rect),
+            None => Tracking::Gone,
+        }
     }
 }

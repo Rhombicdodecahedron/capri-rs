@@ -190,3 +190,53 @@ fn desk_ignores_her_own_window() {
     }
     assert_eq!(desk.character().mode(), Mode::Standing, "fell through her own window onto the floor");
 }
+
+/// A window the test drags around; the full refresh is slow.
+struct SlidingWindow {
+    x: std::sync::Mutex<f32>,
+}
+
+impl DesktopProbe for SlidingWindow {
+    fn work_areas(&self) -> Vec<Rect> {
+        vec![Rect::new(0.0, 0.0, 1920.0, 1040.0)]
+    }
+
+    fn ledges(&self, _: &[u64]) -> Vec<Ledge> {
+        let x = *self.x.lock().unwrap();
+        vec![
+            Ledge { id: LedgeId::Floor(0), kind: LedgeKind::Floor, left: 0.0, right: 1920.0, y: 1040.0 },
+            Ledge { id: LedgeId::window_piece(7, 0), kind: LedgeKind::Window, left: x, right: x + 800.0, y: 300.0 },
+        ]
+    }
+
+    fn track(&self, window: u64) -> Tracking {
+        assert_eq!(window, 7);
+        Tracking::At(Rect::new(*self.x.lock().unwrap(), 300.0, 800.0, 500.0))
+    }
+}
+
+#[test]
+fn desk_follows_a_dragged_window_every_frame() {
+    let cfg = CharacterConfig { roaming: false, ..CharacterConfig::default() };
+    let window = Arc::new(SlidingWindow { x: std::sync::Mutex::new(500.0) });
+    let mut desk = DeskService::new(Character::new(cfg, 1), window.clone());
+    desk.start(0.0);
+    desk.character_mut().appear(capri_domain::Point::new(900.0, 100.0), 0.0);
+    let mut t = 0.0;
+    while desk.character().mode() != Mode::Perching {
+        t += 1.0 / 60.0;
+        desk.tick(t, 1.0 / 60.0);
+        assert!(t < 3.0, "never landed");
+    }
+    // the user drags the window 10 px per frame: she must follow every frame, not every refresh
+    let before = desk.character().position().x;
+    for _ in 0..5 {
+        *window.x.lock().unwrap() += 10.0;
+        t += 1.0 / 60.0;
+        desk.tick(t, 1.0 / 60.0);
+        let step = desk.character().position().x - before;
+        assert!(step > 0.0, "did not move this frame");
+    }
+    let moved = desk.character().position().x - before;
+    assert!((moved - 50.0).abs() < 0.5, "moved {moved}");
+}

@@ -9,7 +9,7 @@ pub mod skin;
 pub mod speech;
 pub mod tools;
 
-pub use desktop::DesktopProbe;
+pub use desktop::{DesktopProbe, Tracking};
 pub use llm::{LanguageModel, LlmError, TokenStream};
 pub use memory::{MemoryError, MemoryStore};
 pub use skin::{Skin, SkinError, SkinInfo, SkinRepository, Sprite, Strip};
