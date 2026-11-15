@@ -112,7 +112,7 @@ impl MemoryStore for SqliteMemory {
         let role = match turn.role {
             Role::User => "user",
             Role::Assistant => "assistant",
-            Role::System => return Ok(()),
+            Role::System | Role::Tool => return Ok(()),
         };
         let content = turn.content.clone();
         self.run(move |c| {
