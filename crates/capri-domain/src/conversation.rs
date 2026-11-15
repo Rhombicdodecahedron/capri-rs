@@ -8,25 +8,56 @@ pub enum Role {
     System,
     User,
     Assistant,
+    /// The result of a tool she called, answering one of the assistant's tool calls.
+    Tool,
+}
+
+/// The model asking to run one of her abilities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCall {
+    /// Set by the model; the matching result carries it back.
+    pub id: String,
+    pub name: String,
+    /// JSON text, exactly as the model wrote it (it may not even parse).
+    pub arguments: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: String,
+    /// On an assistant turn: the tools it wants run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    /// On a tool turn: which call this answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 impl Message {
+    fn of(role: Role, content: impl Into<String>) -> Self {
+        Self { role, content: content.into(), tool_calls: Vec::new(), tool_call_id: None }
+    }
+
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: Role::System, content: content.into() }
+        Self::of(Role::System, content)
     }
 
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: Role::User, content: content.into() }
+        Self::of(Role::User, content)
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: Role::Assistant, content: content.into() }
+        Self::of(Role::Assistant, content)
+    }
+
+    /// An assistant turn that calls tools (with whatever it said alongside).
+    pub fn calling(content: impl Into<String>, calls: Vec<ToolCall>) -> Self {
+        Self { tool_calls: calls, ..Self::of(Role::Assistant, content) }
+    }
+
+    pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self { tool_call_id: Some(call_id.into()), ..Self::of(Role::Tool, content) }
     }
 }
 
@@ -45,7 +76,8 @@ impl Default for Persona {
                 always on the user's side. Answer in the language the user writes in. \
                 Never claim to have done something on the computer unless a tool result says it happened. \
                 The app runs music commands itself before you see them (pause, next, volume, \
-                'mets X sur Spotify'): if the user asks for music in other words, tell them to say it that way."
+                'mets X sur Spotify'). When tools are offered, use them to act on the PC; otherwise say \
+                plainly that you can't do it from here."
                 .into(),
         }
     }
@@ -109,7 +141,12 @@ impl Conversation {
         // merge them, so a reply that failed earlier never breaks the next one.
         for t in &self.turns {
             match out.last_mut() {
-                Some(last) if last.role == t.role && last.role != Role::System => {
+                Some(last)
+                    if last.role == t.role
+                        && matches!(last.role, Role::User | Role::Assistant)
+                        && last.tool_calls.is_empty()
+                        && t.tool_calls.is_empty() =>
+                {
                     last.content.push_str("\n\n");
                     last.content.push_str(&t.content);
                 }

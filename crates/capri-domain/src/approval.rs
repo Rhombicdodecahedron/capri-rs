@@ -60,8 +60,93 @@ pub fn decide_for(mode: ApprovalMode, risk: Risk, origin: Origin) -> Decision {
     d
 }
 
+/// The user's answer to "can I?": `Some(true)` for yes, `Some(false)` for no, `None` when the line
+/// is something else (they moved on, which counts as no).
+pub fn answer(line: &str) -> Option<bool> {
+    const YES: &[&str] = &[
+        "oui",
+        "ouais",
+        "ouai",
+        "ouep",
+        "yes",
+        "yep",
+        "yeah",
+        "y",
+        "o",
+        "ok",
+        "okay",
+        "vas-y",
+        "vas y",
+        "go",
+        "d' accord",
+        "dac",
+        "bien sur",
+        "carrement",
+        "fais-le",
+        "fais le",
+        "fais",
+        "do it",
+        "sure",
+        "allez",
+        "allez-y",
+        "volontiers",
+        "oui vas-y",
+        "oui stp",
+        "yes please",
+        "ja",
+        "si",
+        "confirm",
+        "confirme",
+        "valide",
+    ];
+    const NO: &[&str] = &[
+        "non",
+        "nan",
+        "no",
+        "nope",
+        "n",
+        "annule",
+        "cancel",
+        "stop",
+        "laisse",
+        "laisse tomber",
+        "pas maintenant",
+        "surtout pas",
+        "never",
+        "jamais",
+        "nein",
+        "arrete",
+        "non merci",
+        "no thanks",
+    ];
+    let w = crate::words::words(line);
+    let w: Vec<&str> = w.iter().map(String::as_str).filter(|w| !matches!(*w, "capri" | "merci" | "thanks")).collect();
+    let line = w.join(" ");
+    let first = w.first().copied().unwrap_or_default();
+    if NO.contains(&line.as_str()) || (w.len() <= 4 && matches!(first, "non" | "no" | "nan" | "nope")) {
+        return Some(false);
+    }
+    if YES.contains(&line.as_str())
+        || (w.len() <= 4 && matches!(first, "oui" | "ouais" | "yes" | "ok" | "vas-y" | "go"))
+    {
+        return Some(true);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn yes_and_no_in_french_and_english() {
+        for y in ["Oui", "ouais vas-y", "OK!", "yes please", "d'accord", "vas-y Capri"] {
+            assert_eq!(answer(y), Some(true), "{y}");
+        }
+        for n in ["non", "Non merci", "nope", "annule", "laisse tomber"] {
+            assert_eq!(answer(n), Some(false), "{n}");
+        }
+        assert_eq!(answer("attends, mets plutôt du jazz"), None);
+    }
+
     use super::*;
 
     #[test]
