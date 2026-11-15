@@ -61,7 +61,28 @@ A few things work without a round trip to the model:
 Music commands also skip the model: `pause`, `suivante`, `monte le son`, `mets Daft Punk sur Spotify`,
 `mets en aléatoire`, `like cette chanson`, `c'est quoi cette musique ?` (and their English versions).
 
+So do a few things for her body: `va faire une sieste`, `passe en mini`, `reviens`, `allonge-toi`,
+`réveille-toi` (or `take a nap`, `go mini`, `come back`, `lie down`, `wake up`).
+
 Drag her to move her, let go fast to throw her. Double-click to poke her awake.
+
+## Her rest
+
+Left alone, she doesn't just hop around. Now and then she lies down on the taskbar or on top of the
+window she sits on, breathing slowly; after a while her eyes drift shut and z's float up, and she
+gets up again on her own (never in the middle of a sentence). If you talk to her while she lies
+there, she answers lying down. Nobody around for a couple of minutes and she lies down more often,
+for longer.
+
+Sometimes she takes a proper nap: she shrinks into her mini form, a little screen with her eyes, on
+the taskbar or on her window, eyes shut, z's drifting up. She mumbles back if you talk to her, and
+after a minute or two she wakes up full size. After five minutes without a sound she dozes off
+standing up too.
+
+Asked to go mini, she stays small and awake until you bring her back: she blinks, her eyes follow your
+pointer, she talks with her little mouth, and three quick clicks get you a fed-up look. A
+double-click brings her back full size, from a nap or from lying down too. All of this can be
+switched off in the settings, under BEHAVIOUR.
 
 Facts and the chat log stay on your machine, in a SQLite file in your profile folder.
 
@@ -161,7 +182,7 @@ so its skins drop in unchanged. See [assets/skins/README.md](assets/skins/README
 
 ## Where it is going
 
-- [x] On the desk: perching, falling, roaming, sleeping, chat, memory
+- [x] On the desk: perching, falling, roaming, sleeping, lying down, mini naps, chat, memory
 - [x] Brains: llama.cpp, Ollama, LM Studio, OpenAI, OpenRouter, Claude Code
 - [x] Settings panel with live reload, French and English
 - [x] Tools (music, apps, web, driving other apps) behind the approval check
@@ -170,7 +191,6 @@ so its skins drop in unchanged. See [assets/skins/README.md](assets/skins/README
 - [ ] Files (notes, cleaning Downloads) and reading web pages
 - [ ] MCP client
 - [ ] Driving apps on Linux (AT-SPI) and macOS
-- [ ] Mini form and lying-down poses (the art is already in the skin)
 - [ ] Window edges on macOS and Linux
 
 ## Credits
