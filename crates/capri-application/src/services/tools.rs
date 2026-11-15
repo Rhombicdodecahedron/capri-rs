@@ -44,36 +44,51 @@ impl ToolRunner {
         self
     }
 
+    /// Adds several tools at once (a family that shares state, like the `ui_*` ones).
+    #[must_use]
+    pub fn with_all(self, tools: impl IntoIterator<Item = Arc<dyn Tool>>) -> Self {
+        tools.into_iter().fold(self, Self::with)
+    }
+
     pub fn has(&self, name: &str) -> bool {
-        self.tools.contains_key(name)
+        self.tools.get(name).is_some_and(|t| t.enabled())
     }
 
+    /// The tools to offer the model: the ones switched on.
     pub fn specs(&self) -> Vec<ToolSpec> {
-        self.tools.values().map(|t| t.spec()).collect()
+        self.tools.values().filter(|t| t.enabled()).map(|t| t.spec()).collect()
     }
 
+    /// Runs a tool, asking through the runner's own prompt when the policy says so.
     pub async fn run(&self, name: &str, args: serde_json::Value, origin: Origin) -> Result<String, ToolError> {
+        self.run_asking(name, args, origin, self.prompt.as_ref()).await
+    }
+
+    /// Like [`run`](Self::run), with the question going to `prompt` (the chat the request came from).
+    pub async fn run_asking(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+        origin: Origin,
+        prompt: &dyn ApprovalPrompt,
+    ) -> Result<String, ToolError> {
         let tool = self.tools.get(name).ok_or_else(|| ToolError::Unknown(name.into()))?;
-        let spec = tool.spec();
-        match approval::decide_for(self.mode(), spec.risk, origin) {
+        if !tool.enabled() {
+            return Err(ToolError::Unavailable(format!("{name} is switched off in the settings")));
+        }
+        let risk = tool.risk(&args);
+        match approval::decide_for(self.mode(), risk, origin) {
             Decision::Allow => {}
             Decision::Deny => return Err(ToolError::Blocked),
             Decision::AskUser => {
-                let request =
-                    ActionRequest { tool: spec.name.clone(), summary: summarize(&spec, &args), risk: spec.risk };
-                if !self.prompt.ask(&request).await {
+                let request = ActionRequest { tool: name.to_string(), summary: tool.describe(&args), risk };
+                if !prompt.ask(&request).await {
+                    tracing::info!(tool = name, "declined by the user");
                     return Err(ToolError::Declined);
                 }
             }
         }
-        tracing::info!(tool = %spec.name, ?origin, "running tool");
+        tracing::info!(tool = name, ?origin, ?risk, "running tool");
         tool.run(args).await
     }
-}
-
-fn summarize(spec: &ToolSpec, args: &serde_json::Value) -> String {
-    let args = args.to_string();
-    let args =
-        if args.chars().count() > 160 { format!("{}…", args.chars().take(160).collect::<String>()) } else { args };
-    format!("{} {}", spec.name, args)
 }
