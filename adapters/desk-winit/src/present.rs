@@ -16,6 +16,14 @@ pub trait Presenter {
 
     /// Whether the OS already ignores clicks on transparent pixels.
     fn clicks_pass_through_transparency(&self) -> bool;
+
+    /// Asks the OS to recompute where her window is clickable (it stopped sending her mouse events).
+    fn repair_hit_test(&mut self) {}
+
+    /// Which window holds the mouse capture, for diagnostics (Windows).
+    fn capture_owner(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Platform id of the window (HWND on Windows, X11 window id), so the desktop probe can ignore it.
@@ -122,9 +130,11 @@ mod layered {
         CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, HBITMAP, HDC, HGDIOBJ, ReleaseDC,
         SelectObject,
     };
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetCapture;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GWL_EXSTYLE, GetCursorPos, GetWindowLongW, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER,
-        SWP_NOSIZE, SetWindowLongW, SetWindowPos, ULW_ALPHA, UpdateLayeredWindow, WS_EX_LAYERED,
+        GWL_EXSTYLE, GetCursorPos, GetWindowLongW, HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowLongW, SetWindowPos, ULW_ALPHA, UpdateLayeredWindow,
+        WS_EX_LAYERED,
     };
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use winit::window::Window;
@@ -195,6 +205,7 @@ mod layered {
             unsafe {
                 let ex = GetWindowLongW(self.hwnd, GWL_EXSTYLE) as u32;
                 if ex & WS_EX_LAYERED == 0 {
+                    tracing::debug!("winit dropped the layered style, putting it back");
                     SetWindowLongW(self.hwnd, GWL_EXSTYLE, (ex | WS_EX_LAYERED) as i32);
                 }
             }
@@ -310,6 +321,28 @@ mod layered {
 
         fn clicks_pass_through_transparency(&self) -> bool {
             true
+        }
+
+        fn repair_hit_test(&mut self) {
+            // SAFETY: our own window; re-show it on top and make the system re-read its frame.
+            unsafe {
+                SetWindowPos(
+                    self.hwnd,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+                );
+            }
+            self.size = (0, 0); // rebuild the bitmap on the next frame too
+        }
+
+        fn capture_owner(&self) -> Option<u64> {
+            // SAFETY: reads which window of this thread has the capture.
+            let h = unsafe { GetCapture() };
+            (!h.is_null()).then_some(h as u64)
         }
     }
 }

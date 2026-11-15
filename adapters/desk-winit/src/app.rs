@@ -226,6 +226,11 @@ struct Live {
     scale: f32,
     reload_at: f32,
     voice: Arc<VoiceService>,
+    /// Last mouse event her window received, and since when the pointer has been moving over her
+    /// without any: the sign that Windows stopped sending her clicks.
+    last_mouse_event: f32,
+    unheard_since: Option<f32>,
+    last_os_cursor: Option<Point>,
 }
 
 #[derive(Clone, Copy)]
@@ -288,6 +293,7 @@ impl Live {
         if self.press.is_some() {
             self.pointer_moved(now);
         }
+        self.watch_hit_test(now);
         self.bubble.tick(now);
         let speaking = self.voice.speaking();
         if speaking {
@@ -325,6 +331,34 @@ impl Live {
         self.desk.character_mut().set_config(cfg);
         tracing::info!(skin = %r.options.skin, size, reskin, "settings applied");
         Ok(())
+    }
+
+    /// If the pointer moves over her body for a while and her window gets no mouse event at all,
+    /// Windows has lost her clickable area: log it and make it recompute.
+    fn watch_hit_test(&mut self, now: f32) {
+        let Some((x, y)) = present::os_cursor() else { return };
+        let p = Point::new(x, y);
+        let moved = self.last_os_cursor.is_some_and(|q| (q.x - p.x).abs() + (q.y - p.y).abs() > 2.0);
+        self.last_os_cursor = Some(p);
+        let local = (x - self.origin.0 as f32, y - self.origin.1 as f32);
+        let over_her = self.painter.alpha_at(local.0, local.1) > 0;
+        if !(moved && over_her && now - self.last_mouse_event > 0.3) {
+            if !over_her || now - self.last_mouse_event <= 0.3 {
+                self.unheard_since = None;
+            }
+            return;
+        }
+        let since = *self.unheard_since.get_or_insert(now);
+        if now - since > 0.5 {
+            tracing::warn!(
+                capture = ?self.presenter.capture_owner(),
+                mode = ?self.desk.character().mode(),
+                "the pointer is on her but her window gets no mouse events: repairing"
+            );
+            self.presenter.repair_hit_test();
+            self.unheard_since = None;
+            self.last_mouse_event = now;
+        }
     }
 
     fn on_her(&self) -> bool {
@@ -444,6 +478,9 @@ impl ApplicationHandler<UiEvent> for App {
             scale,
             reload_at: 1.0,
             voice: self.voice.clone(),
+            last_mouse_event: 0.0,
+            unheard_since: None,
+            last_os_cursor: None,
         });
         match GlobalHotKeyManager::new() {
             Ok(m) => {
@@ -495,12 +532,21 @@ impl ApplicationHandler<UiEvent> for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         let Some(s) = self.state.as_mut() else { return };
         let now = s.now();
+        if let WindowEvent::MouseInput { state, button, .. } = &event {
+            s.last_mouse_event = now;
+            tracing::debug!(?state, ?button, "mouse button");
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => s.frame(),
             WindowEvent::CursorMoved { position, .. } => {
                 s.cursor = position;
+                s.last_mouse_event = now;
                 s.pointer_moved(now);
+            }
+            WindowEvent::CursorEntered { .. } | WindowEvent::CursorLeft { .. } | WindowEvent::Focused(_) => {
+                s.last_mouse_event = now;
+                tracing::debug!(?event, "window event");
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                 if s.presenter.clicks_pass_through_transparency() || s.on_her() {
