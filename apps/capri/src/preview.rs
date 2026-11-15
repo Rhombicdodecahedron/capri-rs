@@ -17,7 +17,7 @@ pub fn render(skins: &dyn SkinRepository, id: &str, size: f32, out: &Path) -> an
         (ClipId::Idle, 0, None, Mode::Standing, ""),
         (ClipId::Idle, 3, Some(3), Mode::Standing, "Wake up, choom. Your build passed."),
         (ClipId::Blink, 1, None, Mode::Standing, ""),
-        (ClipId::Perch, 4, None, Mode::Perching, ""),
+        (ClipId::Perch, 4, None, Mode::Perching, "Je suis bien, là-haut."),
         (ClipId::Dangle, 6, None, Mode::Held, ""),
         (ClipId::Sleep, 2, None, Mode::Sleeping, ""),
     ];

@@ -62,12 +62,21 @@ pub struct Painter {
     /// Where the chat box was drawn last frame (canvas px), for click handling.
     pub bubble_rect: Option<Rect>,
     pub lang: Language,
+    /// Opaque bounds of each frame, measured once: the hit area and where her head really is.
+    bounds: std::collections::HashMap<(ClipId, usize), Option<Rect>>,
 }
 
 impl Painter {
     pub fn new(layout: Layout) -> Self {
         let pixmap = Pixmap::new(layout.width.max(1), layout.height.max(1)).expect("canvas size is non-zero");
-        Self { layout, pixmap, font: Typeface::default(), bubble_rect: None, lang: Language::En }
+        Self {
+            layout,
+            pixmap,
+            font: Typeface::default(),
+            bubble_rect: None,
+            lang: Language::En,
+            bounds: std::collections::HashMap::new(),
+        }
     }
 
     pub fn pixmap(&self) -> &Pixmap {
@@ -89,18 +98,33 @@ impl Painter {
             return;
         }
         let a = self.layout.anchor;
+        let mut head = Point::new(a.x + head.x - pose.anchor.x, a.y + head.y - pose.anchor.y);
         if let Some(strip) = skin.strip_or_fallback(pose.frame.clip) {
             let i = (pose.frame.index as usize).min(strip.frames.len() - 1);
             let f = &strip.frames[i];
             let x = a.x - strip.anchor.0 * f.width as f32;
             let y = a.y - strip.anchor.1 * f.height as f32;
+            let b = *self.bounds.entry((strip.clip, i)).or_insert_with(|| opaque_bounds(f));
+            if let Some(b) = b {
+                // the hit area: her whole silhouette box, at alpha 1/255 (invisible) so a click
+                // anywhere on her lands on her window and not on what is behind her thin legs
+                let pad = 6.0 * (self.layout.size / 240.0).max(0.5);
+                if let Some(r) =
+                    tiny_skia::Rect::from_xywh(x + b.x - pad, y + b.y - pad, b.w + 2.0 * pad, b.h + 2.0 * pad)
+                {
+                    let mut hit = Paint::default();
+                    hit.set_color(Color::from_rgba8(0, 0, 0, 1));
+                    self.pixmap.fill_rect(r, &hit, Transform::identity(), None);
+                }
+                // the chat box points at the top of what is actually drawn, standing or seated
+                head = Point::new(x + b.x + b.w / 2.0, y + b.y + b.h * 0.04);
+            }
             draw_sprite(&mut self.pixmap, f, x, y);
             if let (Some(m), Some(mouth)) = (pose.frame.mouth, skin.strip(ClipId::Mouth)) {
                 let mf = &mouth.frames[(m as usize).min(mouth.frames.len() - 1)];
                 draw_sprite(&mut self.pixmap, mf, x, y);
             }
         }
-        let head = Point::new(a.x + head.x - pose.anchor.x, a.y + head.y - pose.anchor.y);
         self.paint_bubble(bubble, head, now);
     }
 
@@ -184,6 +208,23 @@ fn chamfered(x: f32, y: f32, w: f32, h: f32, c: f32, tail_x: f32, tail: f32) -> 
     pb.line_to(x, y + c);
     pb.close();
     pb.finish()
+}
+
+/// The box around a frame's clearly opaque pixels, in frame pixels.
+fn opaque_bounds(sprite: &capri_application::ports::Sprite) -> Option<Rect> {
+    let (w, h) = (sprite.width, sprite.height);
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+    for y in 0..h {
+        for x in 0..w {
+            if sprite.alpha(x, y) > 24 {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
+        }
+    }
+    (x0 <= x1).then(|| Rect { x: x0 as f32, y: y0 as f32, w: (x1 - x0 + 1) as f32, h: (y1 - y0 + 1) as f32 })
 }
 
 fn draw_sprite(pm: &mut Pixmap, sprite: &capri_application::ports::Sprite, x: f32, y: f32) {

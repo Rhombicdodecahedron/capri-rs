@@ -224,7 +224,7 @@ impl Live {
 
     fn on_her(&self) -> bool {
         let (x, y) = self.cursor_local();
-        self.painter.bubble_rect.is_some_and(|r| r.contains(x, y)) || self.painter.alpha_at(x, y) > 40
+        self.painter.bubble_rect.is_some_and(|r| r.contains(x, y)) || self.painter.alpha_at(x, y) > 0
     }
 
     fn press(&mut self) {
