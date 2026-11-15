@@ -10,7 +10,7 @@ use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, RECT, TRUE};
 use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
 use windows_sys::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GWL_EXSTYLE, GetClassNameW, GetWindowLongW, GetWindowRect, GetWindowTextLengthW, IsIconic,
+    EnumWindows, GWL_EXSTYLE, GetClassNameW, GetWindowLongW, GetWindowRect, InternalGetWindowText, IsIconic,
     IsWindowVisible, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 
@@ -54,6 +54,14 @@ unsafe extern "system" fn on_window(hwnd: HWND, data: LPARAM) -> BOOL {
     TRUE
 }
 
+/// Whether the window has a title. `InternalGetWindowText` reads it without sending a message:
+/// `GetWindowTextLength` sends WM_GETTEXTLENGTH and waits, so one busy app would freeze her.
+fn has_title(hwnd: HWND) -> bool {
+    let mut buf = [0u16; 2];
+    // SAFETY: buffer length is passed alongside the buffer.
+    unsafe { InternalGetWindowText(hwnd, buf.as_mut_ptr(), buf.len() as i32) > 0 }
+}
+
 fn class_name(hwnd: HWND) -> String {
     let mut buf = [0u16; 128];
     // SAFETY: buffer length is passed alongside the buffer.
@@ -66,7 +74,7 @@ fn class_name(hwnd: HWND) -> String {
 fn usable(hwnd: HWND) -> Option<Rect> {
     // SAFETY: every call takes the handle by value or writes into a local out-parameter.
     unsafe {
-        if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 || GetWindowTextLengthW(hwnd) == 0 {
+        if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 || !has_title(hwnd) {
             return None;
         }
         let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;

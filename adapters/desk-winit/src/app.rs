@@ -126,9 +126,6 @@ struct Press {
     grab_offset: Point,
     dragging: bool,
     on_bubble: bool,
-    /// The OS has reported the button down during this press. Until then its "up" answer is not
-    /// trusted: some setups never report the button through the global state.
-    seen_down: bool,
 }
 
 impl Live {
@@ -178,26 +175,22 @@ impl Live {
         let now = self.now();
         let dt = now - self.last_tick;
         self.last_tick = now;
-        if let Some(press) = self.press.as_mut() {
-            // a release that happened outside her window (fast throw) must not leave her stuck in the air
-            match present::os_left_button_down() {
-                Some(true) => press.seen_down = true,
-                Some(false) if press.seen_down && press.dragging => {
-                    tracing::debug!("button released outside her window");
-                    self.release(now);
-                }
-                _ => {}
-            }
-            if self.press.is_some() {
-                self.pointer_moved(now);
-            }
+        // while the button is held she follows the pointer every frame, not only on mouse events;
+        // the release itself comes from winit, which captures the mouse during a press
+        if self.press.is_some() {
+            self.pointer_moved(now);
         }
         self.bubble.tick(now);
         let talking = self.bubble.talking(now);
         let c = self.desk.character_mut();
         c.set_talking(talking, now);
         c.set_chat_open(self.bubble.is_open(), now);
+        let started = Instant::now();
         let (pose, _happenings) = self.desk.tick(now, dt);
+        let took = started.elapsed();
+        if took > Duration::from_millis(30) {
+            tracing::warn!(ms = took.as_millis(), "slow frame: reading the desktop took too long");
+        }
         let head = self.desk.character().head();
         self.painter.paint(&pose, head, &self.skin, &self.bubble, now);
         self.origin = self.painter.layout.origin(pose.anchor);
@@ -231,13 +224,8 @@ impl Live {
         let (x, y) = self.cursor_local();
         let on_bubble = self.painter.bubble_rect.is_some_and(|r| r.contains(x, y));
         self.trail.clear();
-        self.press = Some(Press {
-            at_screen: self.cursor_screen(),
-            grab_offset: Point::default(),
-            dragging: false,
-            on_bubble,
-            seen_down: false,
-        });
+        self.press =
+            Some(Press { at_screen: self.cursor_screen(), grab_offset: Point::default(), dragging: false, on_bubble });
         tracing::debug!(x, y, on_bubble, "press");
     }
 

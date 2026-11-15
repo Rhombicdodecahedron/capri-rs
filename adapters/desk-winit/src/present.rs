@@ -43,18 +43,6 @@ pub fn os_cursor() -> Option<(f32, f32)> {
     }
 }
 
-/// Whether the left button is down right now, where the OS can tell (Windows).
-pub fn os_left_button_down() -> Option<bool> {
-    #[cfg(windows)]
-    {
-        Some(layered::left_button_down())
-    }
-    #[cfg(not(windows))]
-    {
-        None
-    }
-}
-
 pub fn create(window: Arc<Window>) -> Box<dyn Presenter> {
     #[cfg(windows)]
     {
@@ -134,9 +122,9 @@ mod layered {
         CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, HBITMAP, HDC, HGDIOBJ, ReleaseDC,
         SelectObject,
     };
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GWL_EXSTYLE, GetCursorPos, GetWindowLongW, SetWindowLongW, ULW_ALPHA, UpdateLayeredWindow, WS_EX_LAYERED,
+        GWL_EXSTYLE, GetCursorPos, GetWindowLongW, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER,
+        SWP_NOSIZE, SetWindowLongW, SetWindowPos, ULW_ALPHA, UpdateLayeredWindow, WS_EX_LAYERED,
     };
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use winit::window::Window;
@@ -147,11 +135,6 @@ mod layered {
         (unsafe { GetCursorPos(&raw mut p) } != 0).then_some((p.x as f32, p.y as f32))
     }
 
-    pub fn left_button_down() -> bool {
-        // SAFETY: reads global input state, no pointers involved. The high bit means "down now".
-        (unsafe { GetAsyncKeyState(i32::from(VK_LBUTTON)) } as u16) & 0x8000 != 0
-    }
-
     pub struct Layered {
         hwnd: HWND,
         dc: HDC,
@@ -160,6 +143,7 @@ mod layered {
         bits: *mut u8,
         size: (u32, u32),
         warned: bool,
+        topmost_at: std::time::Instant,
     }
 
     impl Layered {
@@ -176,9 +160,31 @@ mod layered {
                 bits: std::ptr::null_mut(),
                 size: (0, 0),
                 warned: false,
+                topmost_at: std::time::Instant::now(),
             };
             me.ensure_layered();
             me
+        }
+
+        /// Other always-on-top windows (the taskbar, overlays) can end up above her after they are
+        /// clicked: put her back on top about once a second, without taking the focus.
+        fn keep_on_top(&mut self) {
+            if self.topmost_at.elapsed() < std::time::Duration::from_secs(1) {
+                return;
+            }
+            self.topmost_at = std::time::Instant::now();
+            // SAFETY: z-order change of our own window only; no move, no resize, no activation.
+            unsafe {
+                SetWindowPos(
+                    self.hwnd,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+                );
+            }
         }
 
         /// winit rewrites the window's extended style whenever it updates its own flags (focus, size,
@@ -260,6 +266,7 @@ mod layered {
                 return;
             }
             self.ensure_layered();
+            self.keep_on_top();
             // SAFETY: `bits` points to a w*h*4 byte DIB owned by `self`, alive until `release`.
             let dst = unsafe { std::slice::from_raw_parts_mut(self.bits, (w * h * 4) as usize) };
             // tiny-skia stores premultiplied RGBA, GDI wants premultiplied BGRA
