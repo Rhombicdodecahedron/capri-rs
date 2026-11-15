@@ -8,7 +8,7 @@ use capri_domain::{ApprovalMode, Language, Persona};
 use eframe::egui::{self, Color32, CornerRadius, RichText, Stroke};
 
 use crate::theme::{CYAN, CYAN_DIM, DEEP, GREEN, MUTED, NIGHT, PANEL, RED, TEXT};
-use crate::{SettingsInput, TestReport};
+use crate::{SettingsInput, TestFailure, TestReport};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -25,7 +25,7 @@ const TABS: [Tab; 5] = [Tab::Brain, Tab::Body, Tab::Persona, Tab::Safety, Tab::I
 enum TestState {
     Running,
     Ok(TestReport),
-    Failed(String),
+    Failed(TestFailure),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -516,6 +516,7 @@ impl Panel {
         section(ui, t("MODEL", "MODÈLE"), |ui| {
             let listed: Vec<String> = match &*self.test.lock().expect("test lock") {
                 Some(TestState::Ok(r)) => r.models.clone(),
+                Some(TestState::Failed(f)) => f.models.clone(),
                 _ => Vec::new(),
             };
             let model = &mut self.cfg.brain.model;
@@ -537,8 +538,8 @@ impl Panel {
             hint(
                 ui,
                 t(
-                    "Leave empty for llama.cpp: it serves one model. TEST lists what the server has.",
-                    "Laisse vide pour llama.cpp : il sert un seul modèle. TESTER liste ce que le serveur propose.",
+                    "Empty uses the first model the server lists. TEST shows the exact names.",
+                    "Vide : le premier modèle du serveur. TESTER affiche les noms exacts.",
                 ),
             );
             ui.add_space(4.0);
@@ -561,6 +562,7 @@ impl Panel {
     fn link_test(&mut self, ui: &mut egui::Ui) {
         let lang = self.lang();
         let t = |en: &'static str, fr: &'static str| lang.pick(en, fr);
+        let mut picked: Option<String> = None;
         section(ui, t("LINK TEST", "TEST DU LIEN"), |ui| {
             let running = matches!(*self.test.lock().expect("test lock"), Some(TestState::Running));
             ui.horizontal(|ui| {
@@ -611,11 +613,34 @@ impl Panel {
                     }
                     ui.label(RichText::new(format!("« {} »", r.reply.trim())).color(TEXT).italics());
                 }
-                Some(TestState::Failed(e)) => {
+                Some(TestState::Failed(f)) => {
+                    let message = match &f.missing_model {
+                        Some(m) => format!(
+                            "{} '{m}'",
+                            t("the server has no model named", "le serveur n'a pas de modèle nommé")
+                        ),
+                        None => f.message.clone(),
+                    };
                     ui.horizontal_wrapped(|ui| {
                         status_dot(ui, RED);
-                        ui.label(RichText::new(format!("{}  {e}", t("OFFLINE", "HORS LIGNE"))).color(RED));
+                        ui.label(RichText::new(format!("{}  {message}", t("OFFLINE", "HORS LIGNE"))).color(RED));
                     });
+                    if !f.models.is_empty() {
+                        hint(
+                            ui,
+                            t(
+                                "Models on the server, click one to use it:",
+                                "Modèles sur le serveur, clique pour l'utiliser :",
+                            ),
+                        );
+                        ui.horizontal_wrapped(|ui| {
+                            for m in &f.models {
+                                if neon_button(ui, m, false).clicked() {
+                                    picked = Some(m.clone());
+                                }
+                            }
+                        });
+                    }
                 }
                 _ => hint(
                     ui,
@@ -626,6 +651,10 @@ impl Panel {
                 ),
             }
         });
+        if let Some(m) = picked {
+            self.cfg.brain.model = m;
+            self.start_test(ui.ctx());
+        }
     }
 
     fn body_tab(&mut self, ui: &mut egui::Ui) {

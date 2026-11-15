@@ -144,7 +144,12 @@ fn main() -> anyhow::Result<()> {
                     println!("reply:       {}", r.reply.trim());
                     Ok(())
                 }
-                Err(e) => anyhow::bail!("brain offline: {e}"),
+                Err(e) => {
+                    if !e.models.is_empty() {
+                        println!("models on the server: {}", e.models.join(", "));
+                    }
+                    anyhow::bail!("brain offline: {}", e.message)
+                }
             }
         }
     }

@@ -24,10 +24,25 @@ pub struct TestReport {
     pub total_ms: u128,
 }
 
+/// Why the TEST failed, with whatever the server did list, so the panel can offer the real names.
+#[derive(Debug, Clone, Default)]
+pub struct TestFailure {
+    pub message: String,
+    pub models: Vec<String>,
+    /// Set when the chosen model is not among `models`.
+    pub missing_model: Option<String>,
+}
+
+impl From<String> for TestFailure {
+    fn from(message: String) -> Self {
+        Self { message, ..Self::default() }
+    }
+}
+
 #[async_trait]
 pub trait ConnectionTester: Send + Sync {
     /// Lists the server's models (when it can) and runs a tiny chat, without saving anything.
-    async fn test(&self, brain: Brain, claude_code: ClaudeCodeSection) -> Result<TestReport, String>;
+    async fn test(&self, brain: Brain, claude_code: ClaudeCodeSection) -> Result<TestReport, TestFailure>;
 }
 
 #[derive(Debug, Clone)]

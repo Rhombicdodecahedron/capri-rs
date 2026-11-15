@@ -11,7 +11,7 @@ use capri_config::{Brain as BrainCfg, ClaudeCodeSection, Config, Engine};
 use capri_domain::Message;
 use capri_llm_claude_code::{ClaudeCode, ClaudeCodeConfig};
 use capri_llm_openai::{OpenAiCompatible, OpenAiConfig};
-use capri_settings_egui::{ConnectionTester, TestReport};
+use capri_settings_egui::{ConnectionTester, TestFailure, TestReport};
 use futures::StreamExt;
 
 /// The configured brain. The concrete OpenAI-compatible adapter is kept because listing models is
@@ -77,25 +77,38 @@ pub fn from_config(cfg: &Config) -> anyhow::Result<Brain> {
 }
 
 /// Lists models (when the server can) and times a tiny chat.
-pub async fn test(brain: &Brain) -> Result<TestReport, String> {
+pub async fn test(brain: &Brain) -> Result<TestReport, TestFailure> {
     let (models, model) = match brain {
         Brain::OpenAi(m) => {
-            let models = m.list_models().await.map_err(|e| e.to_string())?;
-            let model = m.model().await.map_err(|e| e.to_string())?;
+            let models = m.list_models().await.map_err(|e| TestFailure::from(e.to_string()))?;
+            let model = m.model().await.map_err(|e| TestFailure {
+                message: e.to_string(),
+                models: models.clone(),
+                missing_model: None,
+            })?;
+            // servers that host several models (llama-server router, llama-swap, Ollama) reject unknown names
+            if !models.is_empty() && !models.contains(&model) {
+                return Err(TestFailure {
+                    message: format!("model '{model}' is not on the server"),
+                    models,
+                    missing_model: Some(model),
+                });
+            }
             (models, model)
         }
         Brain::ClaudeCode(m) => (Vec::new(), m.name()),
     };
+    let fail = |e: String| TestFailure { message: e, models: models.clone(), missing_model: None };
     let prompt = [
         Message::system("You are a terse assistant used for a connection test."),
         Message::user("Reply with one short friendly sentence, in French and English."),
     ];
     let start = Instant::now();
-    let mut stream = brain.model().stream(&prompt).await.map_err(|e| e.to_string())?;
+    let mut stream = brain.model().stream(&prompt).await.map_err(|e| fail(e.to_string()))?;
     let mut reply = String::new();
     let mut first = None;
     while let Some(piece) = stream.next().await {
-        let piece = piece.map_err(|e| e.to_string())?;
+        let piece = piece.map_err(|e| fail(e.to_string()))?;
         if first.is_none() && !piece.trim().is_empty() {
             first = Some(start.elapsed().as_millis());
         }
@@ -103,7 +116,7 @@ pub async fn test(brain: &Brain) -> Result<TestReport, String> {
     }
     let total_ms = start.elapsed().as_millis();
     if reply.trim().is_empty() {
-        return Err("the model answered with nothing".into());
+        return Err(fail("the model answered with nothing".into()));
     }
     Ok(TestReport { models, model, reply, first_word_ms: first.unwrap_or(total_ms), total_ms })
 }
@@ -113,8 +126,8 @@ pub struct Tester;
 
 #[async_trait]
 impl ConnectionTester for Tester {
-    async fn test(&self, brain: BrainCfg, claude_code: ClaudeCodeSection) -> Result<TestReport, String> {
-        let b = build(&brain, &claude_code).map_err(|e| format!("{e:#}"))?;
+    async fn test(&self, brain: BrainCfg, claude_code: ClaudeCodeSection) -> Result<TestReport, TestFailure> {
+        let b = build(&brain, &claude_code).map_err(|e| TestFailure::from(format!("{e:#}")))?;
         test(&b).await
     }
 }

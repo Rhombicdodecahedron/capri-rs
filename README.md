@@ -76,7 +76,7 @@ dozes off), her persona prompt, what she is allowed to do on your PC, and the la
 applies at once, no restart: she swaps brains mid-conversation and reloads her sprites if you changed
 the skin or the size.
 
-For llama.cpp, leave the model empty: llama-server serves one model and she asks it which. Reasoning
+For llama.cpp, leave the model empty to use the first one the server lists, or pick from the names TEST shows (servers hosting several models only accept those exact names). Reasoning
 models (Qwen3 and friends) have their thinking switched off by default, so the first word comes fast;
 there is a checkbox if you want it back.
 
