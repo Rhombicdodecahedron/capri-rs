@@ -13,12 +13,23 @@
 //!
 //! Each PNG is a horizontal strip of equally wide frames; the frame count per clip is fixed by
 //! [`capri_domain::ClipId::spec`]. Any height works: frames are scaled to the character's size.
+//!
+//! Her rest poses are single pictures, also optional:
+//!
+//! ```text
+//!   lay_awake.png  lay.png  lay_talk.png  lay_talk2.png      lying down (eyes open, shut, talking)
+//!   mini/idle.png  mini/blink.png  mini/talk.png  mini/talk2.png  mini/annoyed.png
+//!   mini/annoyed_talk.png  mini/look_left.png  mini/look_right.png  mini/glitch.png
+//! ```
+//!
+//! Each family is cropped to the area its pictures draw on together, so switching looks never moves
+//! her, then scaled: lying, her body is about as long as she is tall; mini, a small screen.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use capri_application::ports::{Skin, SkinError, SkinInfo, SkinRepository, Sprite, Strip};
-use capri_domain::ClipId;
+use capri_domain::{ClipId, ClipKind};
 use image::RgbaImage;
 use image::imageops::FilterType;
 use serde::Deserialize;
@@ -26,6 +37,11 @@ use serde::Deserialize;
 /// Where she sits on a seated frame (her seat on the window edge), as fractions of the frame,
 /// matching the original sheets.
 pub const SEAT_ANCHOR: (f32, f32) = (0.30, 0.71);
+
+/// Lying down, her body is this many times her standing size long (the original's 1.15).
+pub const LAY_LENGTH: f32 = 1.15;
+/// Her mini screen is this many times her size wide (96 px chip at size 240, art at 84%, minus margins).
+pub const MINI_WIDTH: f32 = 0.31;
 
 #[derive(Debug, Clone)]
 pub struct FsSkins {
@@ -82,7 +98,19 @@ impl SkinRepository for FsSkins {
     fn load(&self, id: &str, size: f32, scale: f32) -> Result<Skin, SkinError> {
         let folder = self.folder(id).ok_or_else(|| SkinError::NotFound(id.to_string()))?;
         let mut strips = HashMap::new();
-        for clip in ClipId::ALL {
+        for kind in [ClipKind::LayPose, ClipKind::MiniFace] {
+            let family: Vec<ClipId> = ClipId::ALL.into_iter().filter(|c| c.kind() == kind).collect();
+            let mut images = Vec::new();
+            for clip in family {
+                let file = folder.join(format!("{}.png", clip.file_stem()));
+                if file.is_file() {
+                    let img = image::open(&file).map_err(|e| invalid(id, &file, &e.to_string()))?.into_rgba8();
+                    images.push((clip, img));
+                }
+            }
+            strips.extend(poses(kind, &images, size, scale).into_iter().map(|s| (s.clip, s)));
+        }
+        for clip in ClipId::ALL.into_iter().filter(|c| c.kind() == ClipKind::Strip) {
             let file = folder.join(format!("{}.png", clip.file_stem()));
             if !file.is_file() {
                 if clip == ClipId::Idle {
@@ -130,6 +158,83 @@ pub fn cut(clip: ClipId, img: &RgbaImage, size: f32, scale: f32) -> Result<Strip
         })
         .collect();
     Ok(Strip { clip, frames, anchor })
+}
+
+/// The box (x, y, w, h) holding every clearly drawn pixel of `images`, which share one canvas size.
+fn drawn_box(images: &[&RgbaImage]) -> Option<(u32, u32, u32, u32)> {
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+    for img in images {
+        let (w, h) = img.dimensions();
+        let step = (w.min(h) / 400).max(1);
+        for y in (0..h).step_by(step as usize) {
+            for x in (0..w).step_by(step as usize) {
+                if img.get_pixel(x, y)[3] > 40 {
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x);
+                    y1 = y1.max(y);
+                }
+            }
+        }
+    }
+    let (w, h) = images.first()?.dimensions();
+    (x0 <= x1).then(|| {
+        let x1 = (x1 + 2).min(w - 1);
+        let y1 = (y1 + 2).min(h - 1);
+        (x0.saturating_sub(2), y0.saturating_sub(2), x1 - x0.saturating_sub(2) + 1, y1 - y0.saturating_sub(2) + 1)
+    })
+}
+
+/// Where her lying body rests: the median of where the drawn columns end, so a stray hair spike or a
+/// dangling hand doesn't lift her off the taskbar. As a fraction of the height.
+pub fn rest_line(img: &RgbaImage) -> f32 {
+    let (w, h) = img.dimensions();
+    let step = (w.min(h) / 200).max(1);
+    let mut ends: Vec<u32> =
+        (0..w).step_by(step as usize).filter_map(|x| (0..h).rev().find(|&y| img.get_pixel(x, y)[3] > 40)).collect();
+    if ends.is_empty() {
+        return 1.0;
+    }
+    ends.sort_unstable();
+    ((ends[ends.len() / 2] + 1) as f32 / h as f32).min(1.0)
+}
+
+/// Single-picture looks of one family (lying down, or mini), cropped together and scaled.
+pub fn poses(kind: ClipKind, images: &[(ClipId, RgbaImage)], size: f32, scale: f32) -> Vec<Strip> {
+    let same_canvas: Vec<&RgbaImage> = match images.first() {
+        Some((_, first)) => images.iter().map(|(_, i)| i).filter(|i| i.dimensions() == first.dimensions()).collect(),
+        None => return Vec::new(),
+    };
+    let Some((bx, by, bw, bh)) = drawn_box(&same_canvas) else { return Vec::new() };
+    let width = match kind {
+        ClipKind::LayPose => LAY_LENGTH,
+        ClipKind::MiniFace => MINI_WIDTH,
+        ClipKind::Strip => return Vec::new(),
+    } * size
+        * scale;
+    let target_w = width.round().max(1.0) as u32;
+    let target_h = ((target_w as f32) * bh as f32 / bw as f32).round().max(1.0) as u32;
+    let cropped = |img: &RgbaImage| image::imageops::crop_imm(img, bx, by, bw, bh).to_image();
+    // lying, she rests on her body's underside (judged on the eyes-open look); mini sits on its bottom edge
+    let anchor = match kind {
+        ClipKind::LayPose => {
+            let reference = images.iter().find(|(c, _)| *c == ClipId::LayAwake).unwrap_or(&images[0]);
+            (0.5, rest_line(&cropped(&reference.1)))
+        }
+        _ => (0.5, 1.0),
+    };
+    images
+        .iter()
+        .filter(|(_, img)| img.dimensions() == same_canvas[0].dimensions())
+        .map(|(clip, img)| {
+            let scaled = image::imageops::resize(&cropped(img), target_w, target_h, FilterType::Lanczos3);
+            Strip {
+                clip: *clip,
+                frames: vec![Sprite { width: target_w, height: target_h, pixels: premultiply(scaled.into_raw()) }],
+                anchor,
+            }
+        })
+        .collect()
 }
 
 /// Where her feet touch the ground: the centre of the lowest opaque rows, as frame fractions.
@@ -207,6 +312,43 @@ mod tests {
     fn seated_clips_use_seat_anchor() {
         let s = cut(ClipId::Perch, &strip(16, 384, 384), 120.0, 1.0).unwrap();
         assert_eq!(s.anchor, SEAT_ANCHOR);
+    }
+
+    #[test]
+    fn rest_poses_share_one_crop_and_rest_on_the_body() {
+        // two looks on a big canvas, drawn in the same spot; one has a hair spike lower down
+        let mut awake = RgbaImage::new(400, 200);
+        for y in 100..150 {
+            for x in 50..350 {
+                awake.put_pixel(x, y, Rgba([255, 0, 60, 255]));
+            }
+        }
+        let mut shut = awake.clone();
+        for y in 150..170 {
+            shut.put_pixel(200, y, Rgba([255, 0, 60, 255]));
+        }
+        let s = poses(ClipKind::LayPose, &[(ClipId::LayAwake, awake), (ClipId::Lay, shut)], 100.0, 1.0);
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[0].frames[0].width, 115, "as long as she is tall, times 1.15");
+        assert_eq!(s[0].frames[0].height, s[1].frames[0].height, "one crop for the family");
+        let (_, ay) = s[0].anchor;
+        assert!(ay < 0.8, "rests on the body, not the spike: {ay}");
+        let real = SkinPaths::bundled_capri();
+        if let Some(dir) = real {
+            let skin = FsSkins::new(vec![dir]).load("capri", 240.0, 1.0).unwrap();
+            assert!(skin.can_lie_down() && skin.has_mini());
+            let mini = skin.strip(ClipId::MiniTalk).unwrap();
+            assert_eq!(mini.frames[0].width, (240.0_f32 * MINI_WIDTH).round() as u32);
+        }
+    }
+
+    /// The bundled skins folder, when the tests run inside the repository.
+    struct SkinPaths;
+    impl SkinPaths {
+        fn bundled_capri() -> Option<PathBuf> {
+            let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/skins");
+            p.join("capri/idle.png").is_file().then_some(p)
+        }
     }
 
     #[test]

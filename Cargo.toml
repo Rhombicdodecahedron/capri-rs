@@ -92,3 +92,8 @@ opt-level = 2
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# the image scaling code is generic, so it is compiled inside the skin loader: optimise that crate in
+# dev builds and tests too, or loading the big lying-down and mini pictures takes half a minute
+[profile.dev.package.capri-skin-fs]
+opt-level = 3

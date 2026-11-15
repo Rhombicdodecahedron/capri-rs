@@ -57,18 +57,19 @@ impl Skin {
             if let Some(s) = self.strips.get(&id) {
                 return Some(s);
             }
-            c = fallback(id);
+            c = id.fallback();
         }
         None
     }
-}
 
-fn fallback(clip: ClipId) -> Option<ClipId> {
-    match clip {
-        ClipId::Idle | ClipId::Mouth => None,
-        ClipId::PerchBlink | ClipId::PerchBlinkGlitch | ClipId::PerchGlitch => Some(ClipId::Perch),
-        ClipId::BlinkGlitch => Some(ClipId::Blink),
-        _ => Some(ClipId::Idle),
+    /// Whether this skin can lie down (it draws `lay_awake`).
+    pub fn can_lie_down(&self) -> bool {
+        self.strips.contains_key(&ClipId::LayAwake)
+    }
+
+    /// Whether this skin has a mini form (it draws `mini/idle`).
+    pub fn has_mini(&self) -> bool {
+        self.strips.contains_key(&ClipId::MiniIdle)
     }
 }
 
