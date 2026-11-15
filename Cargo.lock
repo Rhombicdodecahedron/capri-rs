@@ -384,6 +384,7 @@ dependencies = [
  "capri-domain",
  "capri-llm-claude-code",
  "capri-llm-openai",
+ "capri-media-os",
  "capri-memory-sqlite",
  "capri-settings-egui",
  "capri-skin-fs",
@@ -495,6 +496,18 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "capri-media-os"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "capri-application",
+ "capri-domain",
+ "serde_json",
+ "tracing",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

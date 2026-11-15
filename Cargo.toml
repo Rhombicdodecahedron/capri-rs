@@ -14,6 +14,7 @@ members = [
     "adapters/audio-cpal",
     "adapters/speech-cloud",
     "adapters/speech-whisper",
+    "adapters/media-os",
     "apps/capri",
 ]
 
@@ -38,6 +39,7 @@ capri-settings-egui = { path = "adapters/settings-egui" }
 capri-audio-cpal = { path = "adapters/audio-cpal" }
 capri-speech-cloud = { path = "adapters/speech-cloud" }
 capri-speech-whisper = { path = "adapters/speech-whisper" }
+capri-media-os = { path = "adapters/media-os" }
 
 anyhow = "1"
 async-trait = "0.1"
