@@ -266,7 +266,8 @@ impl ApplicationHandler<UiEvent> for App {
         let mut attrs = Window::default_attributes()
             .with_title("Capri")
             .with_decorations(false)
-            .with_transparent(true)
+            // on Windows the layered window gives real per-pixel alpha; winit's blur-behind would fight it
+            .with_transparent(!cfg!(windows))
             .with_resizable(false)
             .with_window_level(WindowLevel::AlwaysOnTop)
             .with_inner_size(PhysicalSize::new(layout.width, layout.height));

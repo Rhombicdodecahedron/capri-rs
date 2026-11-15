@@ -159,6 +159,7 @@ mod layered {
         old: HGDIOBJ,
         bits: *mut u8,
         size: (u32, u32),
+        warned: bool,
     }
 
     impl Layered {
@@ -167,18 +168,29 @@ mod layered {
                 Ok(RawWindowHandle::Win32(h)) => h.hwnd.get() as HWND,
                 _ => std::ptr::null_mut(),
             };
-            // SAFETY: `hwnd` is the live window winit just created; we only add a style bit.
-            unsafe {
-                let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-                SetWindowLongW(hwnd, GWL_EXSTYLE, (ex | WS_EX_LAYERED) as i32);
-            }
-            Self {
+            let me = Self {
                 hwnd,
                 dc: std::ptr::null_mut(),
                 bitmap: std::ptr::null_mut(),
                 old: std::ptr::null_mut(),
                 bits: std::ptr::null_mut(),
                 size: (0, 0),
+                warned: false,
+            };
+            me.ensure_layered();
+            me
+        }
+
+        /// winit rewrites the window's extended style whenever it updates its own flags (focus, size,
+        /// level...), and that drops WS_EX_LAYERED. Without it `UpdateLayeredWindow` fails silently:
+        /// the window stops following her and stops hit-testing per pixel. So it is checked every frame.
+        fn ensure_layered(&self) {
+            // SAFETY: `hwnd` is our live window; reading and setting one style bit.
+            unsafe {
+                let ex = GetWindowLongW(self.hwnd, GWL_EXSTYLE) as u32;
+                if ex & WS_EX_LAYERED == 0 {
+                    SetWindowLongW(self.hwnd, GWL_EXSTYLE, (ex | WS_EX_LAYERED) as i32);
+                }
             }
         }
 
@@ -247,6 +259,7 @@ mod layered {
             if self.hwnd.is_null() || !self.ensure(w, h) {
                 return;
             }
+            self.ensure_layered();
             // SAFETY: `bits` points to a w*h*4 byte DIB owned by `self`, alive until `release`.
             let dst = unsafe { std::slice::from_raw_parts_mut(self.bits, (w * h * 4) as usize) };
             // tiny-skia stores premultiplied RGBA, GDI wants premultiplied BGRA
@@ -266,9 +279,9 @@ mod layered {
                 AlphaFormat: AC_SRC_ALPHA as u8,
             };
             // SAFETY: all pointers are to locals; `dc` holds the selected DIB.
-            unsafe {
+            let ok = unsafe {
                 let screen = GetDC(std::ptr::null_mut());
-                UpdateLayeredWindow(
+                let ok = UpdateLayeredWindow(
                     self.hwnd,
                     screen,
                     &raw const pos,
@@ -280,6 +293,11 @@ mod layered {
                     ULW_ALPHA,
                 );
                 ReleaseDC(std::ptr::null_mut(), screen);
+                ok
+            };
+            if ok == 0 && !self.warned {
+                self.warned = true;
+                tracing::warn!("UpdateLayeredWindow failed: her window may not follow her");
             }
         }
 
