@@ -13,5 +13,5 @@ pub use desktop::{DesktopProbe, Tracking};
 pub use llm::{LanguageModel, LlmError, TokenStream};
 pub use memory::{MemoryError, MemoryStore};
 pub use skin::{Skin, SkinError, SkinInfo, SkinRepository, Sprite, Strip};
-pub use speech::{Audio, SpeechError, SpeechToText, TextToSpeech};
+pub use speech::{Audio, Microphone, Speaker, SpeechError, SpeechToText, TextToSpeech};
 pub use tools::{ActionRequest, ApprovalPrompt, Tool, ToolError, ToolSpec};
