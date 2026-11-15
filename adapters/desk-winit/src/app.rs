@@ -7,8 +7,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use capri_application::ports::{Skin, SkinRepository};
-use capri_application::services::{ChatEvent, ChatService, DeskService, FailureKind};
+use capri_application::services::{ChatEvent, ChatService, DeskService, FailureKind, Heard, VoiceService};
 use capri_domain::{CharacterConfig, Language, Point, Rect};
+use global_hotkey::hotkey::HotKey;
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
@@ -31,6 +33,8 @@ pub struct DeskOptions {
     pub fps: u32,
     /// Resolved interface language.
     pub lang: Language,
+    /// Push-to-talk key, e.g. `F8` or `Ctrl+Alt+Space`.
+    pub push_to_talk: String,
 }
 
 /// New settings to apply live (the brain is swapped by the caller before returning this).
@@ -58,6 +62,8 @@ impl std::fmt::Debug for DeskHooks {
 #[derive(Debug)]
 pub enum UiEvent {
     Chat(ChatEvent),
+    /// What push-to-talk heard.
+    Heard(Result<Heard, String>),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -76,12 +82,26 @@ pub fn run(
     chat: Arc<ChatService>,
     runtime: tokio::runtime::Handle,
     hooks: DeskHooks,
+    voice: Arc<VoiceService>,
 ) -> Result<(), DeskError> {
     let event_loop =
         EventLoop::<UiEvent>::with_user_event().build().map_err(|e| DeskError::EventLoop(e.to_string()))?;
     let proxy = event_loop.create_proxy();
-    let mut app =
-        App { options, make_desk: Some(make_desk), skins, chat, runtime, proxy, hooks, state: None, error: None };
+    let mut app = App {
+        options,
+        make_desk: Some(make_desk),
+        skins,
+        chat,
+        runtime,
+        proxy,
+        hooks,
+        voice,
+        hotkeys: None,
+        ptt: None,
+        listening: false,
+        state: None,
+        error: None,
+    };
     event_loop.run_app(&mut app).map_err(|e| DeskError::EventLoop(e.to_string()))?;
     match app.error {
         Some(e) => Err(e),
@@ -97,8 +117,95 @@ struct App {
     runtime: tokio::runtime::Handle,
     proxy: EventLoopProxy<UiEvent>,
     hooks: DeskHooks,
+    voice: Arc<VoiceService>,
+    hotkeys: Option<GlobalHotKeyManager>,
+    ptt: Option<HotKey>,
+    listening: bool,
     state: Option<Live>,
     error: Option<DeskError>,
+}
+
+impl App {
+    /// Sends a line (typed or heard) to the brain; the reply streams back as events and, sentence by
+    /// sentence, to her voice.
+    fn send_line(&self, line: String) {
+        let (chat, proxy, voice) = (self.chat.clone(), self.proxy.clone(), self.voice.clone());
+        self.runtime.spawn(async move {
+            chat.send(&line, |e| {
+                match &e {
+                    ChatEvent::Delta(d) => voice.say_streamed(d),
+                    ChatEvent::Done(_) => voice.say_done(),
+                    _ => {}
+                }
+                let _ = proxy.send_event(UiEvent::Chat(e));
+            })
+            .await;
+        });
+    }
+
+    /// (Re)registers the push-to-talk key; a bad key name is logged, not fatal.
+    fn register_ptt(&mut self) {
+        let Some(manager) = self.hotkeys.as_ref() else { return };
+        if let Some(old) = self.ptt.take() {
+            let _ = manager.unregister(old);
+        }
+        let name = self.options.push_to_talk.trim();
+        if name.is_empty() {
+            return;
+        }
+        match name.parse::<HotKey>() {
+            Ok(key) => match manager.register(key) {
+                Ok(()) => {
+                    tracing::info!(key = name, "push-to-talk ready");
+                    self.ptt = Some(key);
+                }
+                Err(e) => tracing::warn!(key = name, error = %e, "push-to-talk key is taken by another app"),
+            },
+            Err(e) => tracing::warn!(key = name, error = %e, "push-to-talk key not understood"),
+        }
+    }
+
+    fn poll_ptt(&mut self) {
+        while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+            if self.ptt.is_none_or(|k| k.id() != event.id()) {
+                continue;
+            }
+            let Some(s) = self.state.as_mut() else { continue };
+            match event.state() {
+                HotKeyState::Pressed if !self.listening => {
+                    if !self.voice.can_listen() {
+                        let now = s.now();
+                        let msg = s.painter.lang.pick(
+                            "Speech recognition is off. Set it up in the settings, VOICE tab.",
+                            "La reconnaissance vocale est désactivée. Règle-la dans les réglages, onglet VOIX.",
+                        );
+                        s.bubble.fail(msg.to_string(), now);
+                        continue;
+                    }
+                    match self.voice.listen() {
+                        Ok(()) => {
+                            self.listening = true;
+                            s.bubble.listen();
+                        }
+                        Err(e) => {
+                            let now = s.now();
+                            s.bubble.fail(e.0, now);
+                        }
+                    }
+                }
+                HotKeyState::Released if self.listening => {
+                    self.listening = false;
+                    s.bubble.heard();
+                    let (voice, proxy) = (self.voice.clone(), self.proxy.clone());
+                    self.runtime.spawn(async move {
+                        let heard = voice.heard().await.map_err(|e| e.0);
+                        let _ = proxy.send_event(UiEvent::Heard(heard));
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Everything that exists once the window is up.
@@ -118,6 +225,7 @@ struct Live {
     trail: Vec<(f32, Point)>,
     scale: f32,
     reload_at: f32,
+    voice: Arc<VoiceService>,
 }
 
 #[derive(Clone, Copy)]
@@ -181,7 +289,11 @@ impl Live {
             self.pointer_moved(now);
         }
         self.bubble.tick(now);
-        let talking = self.bubble.talking(now);
+        let speaking = self.voice.speaking();
+        if speaking {
+            self.bubble.hold_until(now + 1.5);
+        }
+        let talking = self.bubble.talking(now) || speaking;
         let c = self.desk.character_mut();
         c.set_talking(talking, now);
         c.set_chat_open(self.bubble.is_open(), now);
@@ -331,13 +443,30 @@ impl ApplicationHandler<UiEvent> for App {
             trail: Vec::new(),
             scale,
             reload_at: 1.0,
+            voice: self.voice.clone(),
         });
+        match GlobalHotKeyManager::new() {
+            Ok(m) => {
+                self.hotkeys = Some(m);
+                self.register_ptt();
+            }
+            Err(e) => tracing::warn!(error = %e, "no global keys on this system: push-to-talk is off"),
+        }
     }
 
     fn user_event(&mut self, _: &ActiveEventLoop, event: UiEvent) {
         let Some(s) = self.state.as_mut() else { return };
         let now = s.now();
         match event {
+            UiEvent::Heard(Ok(Heard::Text(line))) => {
+                tracing::info!(heard = %line, "push-to-talk");
+                self.send_line(line);
+            }
+            UiEvent::Heard(Ok(Heard::Nothing)) => s.bubble.close(),
+            UiEvent::Heard(Err(e)) => {
+                let msg = format!("{} {e}", s.painter.lang.pick("I didn't catch that:", "Je n'ai pas compris :"));
+                s.bubble.fail(msg, now);
+            }
             UiEvent::Chat(ChatEvent::Thinking) => {}
             UiEvent::Chat(ChatEvent::Delta(d)) => s.bubble.push_reply(&d),
             UiEvent::Chat(ChatEvent::Done(full)) => s.bubble.finish(full, now),
@@ -399,14 +528,8 @@ impl ApplicationHandler<UiEvent> for App {
                             (self.hooks.open_settings)();
                             return;
                         }
-                        let chat = self.chat.clone();
-                        let proxy = self.proxy.clone();
-                        self.runtime.spawn(async move {
-                            chat.send(&line, |e| {
-                                let _ = proxy.send_event(UiEvent::Chat(e));
-                            })
-                            .await;
-                        });
+                        self.voice.interrupt();
+                        self.send_line(line);
                     }
                 }
                 Key::Named(NamedKey::Escape) => s.bubble.close(),
@@ -422,6 +545,7 @@ impl ApplicationHandler<UiEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.poll_ptt();
         let Some(s) = self.state.as_mut() else { return };
         let now = s.now();
         if now >= s.reload_at {
@@ -430,9 +554,14 @@ impl ApplicationHandler<UiEvent> for App {
                 if let Err(e) = s.apply(&r, self.skins.as_ref()) {
                     tracing::warn!(error = %e, "could not apply the new settings");
                 }
+                let new_key = r.options.push_to_talk != self.options.push_to_talk;
                 self.options = r.options;
+                if new_key {
+                    self.register_ptt();
+                }
             }
         }
+        let Some(s) = self.state.as_mut() else { return };
         s.window.request_redraw();
         let frame = Duration::from_secs_f64(1.0 / f64::from(self.options.fps.clamp(10, 144)));
         event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + frame));

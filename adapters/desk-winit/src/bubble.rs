@@ -7,6 +7,8 @@ pub enum BubbleState {
     Typing {
         draft: String,
     },
+    /// Push-to-talk is held: she is listening.
+    Listening,
     /// Waiting for the first words of the reply.
     Thinking,
     /// Her reply (possibly still streaming in).
@@ -43,6 +45,24 @@ impl Bubble {
     pub fn open_typing(&mut self) {
         self.state = BubbleState::Typing { draft: String::new() };
         self.hide_at = None;
+    }
+
+    pub fn listen(&mut self) {
+        self.state = BubbleState::Listening;
+        self.hide_at = None;
+    }
+
+    /// Words heard by push-to-talk: she thinks about them like a typed line.
+    pub fn heard(&mut self) {
+        self.state = BubbleState::Thinking;
+        self.hide_at = None;
+    }
+
+    /// Keeps a finished reply on screen at least until `until` (while she reads it out loud).
+    pub fn hold_until(&mut self, until: f32) {
+        if let (BubbleState::Saying { done: true, .. } | BubbleState::Error(_), Some(h)) = (&self.state, self.hide_at) {
+            self.hide_at = Some(h.max(until));
+        }
     }
 
     pub fn close(&mut self) {

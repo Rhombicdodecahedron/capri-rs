@@ -7,7 +7,7 @@ use std::time::Instant;
 use anyhow::Context;
 use async_trait::async_trait;
 use capri_application::ports::LanguageModel;
-use capri_config::{Brain as BrainCfg, ClaudeCodeSection, Config, Engine};
+use capri_config::{Brain as BrainCfg, ClaudeCodeSection, Config, Engine, Voice};
 use capri_domain::Message;
 use capri_llm_claude_code::{ClaudeCode, ClaudeCodeConfig};
 use capri_llm_openai::{OpenAiCompatible, OpenAiConfig};
@@ -121,13 +121,54 @@ pub async fn test(brain: &Brain) -> Result<TestReport, TestFailure> {
     Ok(TestReport { models, model, reply, first_word_ms: first.unwrap_or(total_ms), total_ms })
 }
 
-#[derive(Debug, Default)]
-pub struct Tester;
+/// What the settings panel calls to try things out with the real adapters.
+#[derive(Debug)]
+pub struct Tester {
+    data: std::path::PathBuf,
+    devices: std::sync::OnceLock<crate::voice::Devices>,
+}
+
+impl Tester {
+    pub fn new(data: std::path::PathBuf) -> Self {
+        Self { data, devices: std::sync::OnceLock::new() }
+    }
+
+    fn devices(&self, volume: f32) -> &crate::voice::Devices {
+        self.devices.get_or_init(|| crate::voice::Devices::new(volume))
+    }
+}
 
 #[async_trait]
 impl ConnectionTester for Tester {
     async fn test(&self, brain: BrainCfg, claude_code: ClaudeCodeSection) -> Result<TestReport, TestFailure> {
         let b = build(&brain, &claude_code).map_err(|e| TestFailure::from(format!("{e:#}")))?;
         test(&b).await
+    }
+
+    async fn test_hearing(&self, voice: Voice) -> Result<String, String> {
+        crate::voice::test_hearing(&voice, &self.data, self.devices(voice.volume), 4.0).await
+    }
+
+    async fn test_voice(&self, voice: Voice, line: String) -> Result<u128, String> {
+        crate::voice::test_voice(&voice, self.devices(voice.volume), &line).await
+    }
+
+    async fn elevenlabs_voices(&self, voice: Voice) -> Result<Vec<(String, String)>, String> {
+        let key = capri_config::resolve_key(voice.tts.api_key_env.as_deref(), voice.tts.api_key.as_deref())?
+            .ok_or("paste your ElevenLabs key first")?;
+        let list = capri_speech_cloud::elevenlabs_voices(&key).await.map_err(|e| e.0)?;
+        Ok(list.into_iter().map(|v| (v.id, v.name)).collect())
+    }
+
+    async fn download_whisper(&self, size: String) -> Result<std::path::PathBuf, String> {
+        crate::voice::download_whisper(&size, &self.data).await
+    }
+
+    fn whisper_available(&self) -> bool {
+        capri_speech_whisper::AVAILABLE
+    }
+
+    fn whisper_model_path(&self, voice: &Voice) -> std::path::PathBuf {
+        crate::voice::whisper_model_path(voice, &self.data)
     }
 }

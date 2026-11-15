@@ -8,6 +8,13 @@ rust-version.workspace = true
 repository.workspace = true
 default-run = "capri"
 
+[features]
+default = []
+# speech recognition on this PC with whisper.cpp (needs CMake and a C++ compiler)
+whisper-local = ["capri-speech-whisper/whisper"]
+# the same, on an NVIDIA GPU (needs the CUDA toolkit)
+whisper-cuda = ["capri-speech-whisper/cuda"]
+
 [[bin]]
 name = "capri"
 path = "src/main.rs"
@@ -23,6 +30,10 @@ capri-desktop-windows = { workspace = true }
 capri-memory-sqlite = { workspace = true }
 capri-desk-winit = { workspace = true }
 capri-settings-egui = { workspace = true }
+capri-audio-cpal = { workspace = true }
+capri-speech-cloud = { workspace = true }
+capri-speech-whisper = { workspace = true }
+reqwest = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 clap = { workspace = true }

@@ -9,10 +9,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use capri_config::{Brain, ClaudeCodeSection};
+use capri_config::{Brain, ClaudeCodeSection, Voice};
 
 mod panel;
 mod theme;
+mod voice_tab;
 
 /// What the TEST button shows.
 #[derive(Debug, Clone)]
@@ -43,6 +44,24 @@ impl From<String> for TestFailure {
 pub trait ConnectionTester: Send + Sync {
     /// Lists the server's models (when it can) and runs a tiny chat, without saving anything.
     async fn test(&self, brain: Brain, claude_code: ClaudeCodeSection) -> Result<TestReport, TestFailure>;
+
+    /// Records a few seconds from the microphone and returns what was understood.
+    async fn test_hearing(&self, voice: Voice) -> Result<String, String>;
+
+    /// Speaks a sample line; returns the time to the first sound in ms.
+    async fn test_voice(&self, voice: Voice, line: String) -> Result<u128, String>;
+
+    /// The ElevenLabs voices of this key, as (id, name).
+    async fn elevenlabs_voices(&self, voice: Voice) -> Result<Vec<(String, String)>, String>;
+
+    /// Downloads a Whisper model (`tiny`, `base`, `small`, `medium`) and returns its path.
+    async fn download_whisper(&self, size: String) -> Result<PathBuf, String>;
+
+    /// Whether this build includes local Whisper.
+    fn whisper_available(&self) -> bool;
+
+    /// Where the local Whisper model of these settings is (or would be).
+    fn whisper_model_path(&self, voice: &Voice) -> PathBuf;
 }
 
 #[derive(Debug, Clone)]

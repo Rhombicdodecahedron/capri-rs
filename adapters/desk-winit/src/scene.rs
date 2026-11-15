@@ -139,6 +139,11 @@ impl Painter {
                 let caret = if (now * 2.0) as i32 % 2 == 0 { "_" } else { " " };
                 (l.pick("YOU", "TOI"), format!("> {draft}{caret}"), rgb((0xe6, 0xf7, 0xff), 255))
             }
+            BubbleState::Listening => {
+                let waves = [")", "))", ")))", "))"];
+                let wave = waves[(now * 6.0) as usize % waves.len()];
+                (l.pick("YOU", "TOI"), format!("{} {wave}", l.pick("listening", "j'écoute")), rgb(NEON_CYAN, 255))
+            }
             BubbleState::Thinking => {
                 let dots = ".".repeat(1 + (now * 3.0) as usize % 3);
                 ("CAPRI", format!("{}{dots}", l.pick("jacking in", "connexion")), rgb(NEON_CYAN, 220))

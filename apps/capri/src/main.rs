@@ -4,6 +4,7 @@
 mod brain;
 mod desk;
 mod preview;
+mod voice;
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -115,14 +116,14 @@ fn main() -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             let chat = chat_service(&cfg, &p)?;
             rt.block_on(chat.resume());
-            desk::run(&cfg, p.config.clone(), skins, chat, &rt)
+            desk::run(&cfg, p.config.clone(), p.data.clone(), skins, chat, &rt)
         }
         Command::Settings { test } => {
             let rt = tokio::runtime::Runtime::new()?;
             let input = SettingsInput {
                 config_path: p.config.clone(),
                 skins: skins.list().into_iter().map(|s| SkinChoice { id: s.id, name: s.name }).collect(),
-                tester: Arc::new(brain::Tester),
+                tester: Arc::new(brain::Tester::new(p.data.clone())),
                 runtime: rt.handle().clone(),
                 system_locale: sys_locale::get_locale(),
                 test_on_open: test,

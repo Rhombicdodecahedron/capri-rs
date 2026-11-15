@@ -13,19 +13,34 @@ use crate::{SettingsInput, TestFailure, TestReport};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Brain,
+    Voice,
     Body,
     Persona,
     Safety,
     Interface,
 }
 
-const TABS: [Tab; 5] = [Tab::Brain, Tab::Body, Tab::Persona, Tab::Safety, Tab::Interface];
+const TABS: [Tab; 6] = [Tab::Brain, Tab::Voice, Tab::Body, Tab::Persona, Tab::Safety, Tab::Interface];
 
 #[derive(Debug, Clone)]
 enum TestState {
     Running,
     Ok(TestReport),
     Failed(TestFailure),
+}
+
+/// A background job started by a button (test, download), shown under it.
+#[derive(Debug, Clone)]
+pub(crate) enum Job<T> {
+    Idle,
+    Running,
+    Done(Result<T, String>),
+}
+
+pub(crate) type Slot<T> = Arc<Mutex<Job<T>>>;
+
+fn slot<T>() -> Slot<T> {
+    Arc::new(Mutex::new(Job::Idle))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,9 +51,9 @@ enum KeySource {
 }
 
 pub struct Panel {
-    input: SettingsInput,
+    pub(crate) input: SettingsInput,
     saved: Config,
-    cfg: Config,
+    pub(crate) cfg: Config,
     tab: Tab,
     key_source: KeySource,
     show_key: bool,
@@ -47,6 +62,10 @@ pub struct Panel {
     status: Option<(String, bool)>,
     load_error: Option<String>,
     auto_test: bool,
+    pub(crate) hearing: Slot<String>,
+    pub(crate) speaking: Slot<u128>,
+    pub(crate) voices: Slot<Vec<(String, String)>>,
+    pub(crate) download: Slot<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for Panel {
@@ -81,6 +100,10 @@ impl Panel {
             status: None,
             load_error,
             auto_test: false,
+            hearing: slot(),
+            speaking: slot(),
+            voices: slot(),
+            download: slot(),
         }
     }
 
@@ -91,7 +114,7 @@ impl Panel {
         self
     }
 
-    fn lang(&self) -> Language {
+    pub(crate) fn lang(&self) -> Language {
         self.cfg.ui.language.resolve(self.input.system_locale.as_deref())
     }
 
@@ -107,6 +130,7 @@ impl Panel {
     fn tab_label(&self, tab: Tab) -> &'static str {
         match tab {
             Tab::Brain => self.t("BRAIN", "CERVEAU"),
+            Tab::Voice => self.t("VOICE", "VOIX"),
             Tab::Body => self.t("BODY", "CORPS"),
             Tab::Persona => "PERSONA",
             Tab::Safety => self.t("SAFETY", "SÉCURITÉ"),
@@ -129,7 +153,7 @@ impl Panel {
     }
 
     /// Turns the panel's choices back into the file's representation.
-    fn normalise(&mut self) {
+    pub(crate) fn normalise(&mut self) {
         let b = &mut self.cfg.brain;
         match self.key_source {
             KeySource::None => {
@@ -153,6 +177,22 @@ impl Panel {
         if self.cfg.claude_code.model.as_deref().is_some_and(|s| s.trim().is_empty()) {
             self.cfg.claude_code.model = None;
         }
+        let v = &mut self.cfg.voice;
+        for o in [
+            &mut v.stt.api_key,
+            &mut v.stt.api_key_env,
+            &mut v.stt.base_url,
+            &mut v.tts.api_key,
+            &mut v.tts.api_key_env,
+            &mut v.tts.base_url,
+        ] {
+            if o.as_deref().is_some_and(|s| s.trim().is_empty()) {
+                *o = None;
+            }
+        }
+        if v.stt.model_path.as_ref().is_some_and(|p| p.as_os_str().is_empty()) {
+            v.stt.model_path = None;
+        }
     }
 
     fn start_test(&mut self, ctx: &egui::Context) {
@@ -173,22 +213,41 @@ impl Panel {
     }
 }
 
+pub(crate) fn run_job<T: Send + 'static>(
+    rt: &tokio::runtime::Handle,
+    ctx: &egui::Context,
+    slot: &Slot<T>,
+    job: impl std::future::Future<Output = Result<T, String>> + Send + 'static,
+) {
+    *slot.lock().expect("job lock") = Job::Running;
+    let (slot, ctx) = (slot.clone(), ctx.clone());
+    rt.spawn(async move {
+        let r = job.await;
+        *slot.lock().expect("job lock") = Job::Done(r);
+        ctx.request_repaint();
+    });
+}
+
+pub(crate) fn running<T>(slot: &Slot<T>) -> bool {
+    matches!(*slot.lock().expect("job lock"), Job::Running)
+}
+
 fn toml_eq(a: &Config, b: &Config) -> Option<bool> {
     Some(toml::to_string(a).ok()? == toml::to_string(b).ok()?)
 }
 
 /// Small caps label above a field.
-fn label(ui: &mut egui::Ui, text: &str) {
+pub(crate) fn label(ui: &mut egui::Ui, text: &str) {
     ui.add_space(4.0);
     ui.label(RichText::new(text).color(CYAN).size(12.0));
 }
 
-fn hint(ui: &mut egui::Ui, text: &str) {
+pub(crate) fn hint(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).color(MUTED).size(12.5));
 }
 
 /// A section box with a cut corner and a red tab, like the chat bubble on the desk.
-fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
+pub(crate) fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
     let frame = egui::Frame::new()
         .fill(PANEL)
         .stroke(Stroke::new(1.0_f32, CYAN_DIM))
@@ -220,12 +279,12 @@ fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(10.0);
 }
 
-fn status_dot(ui: &mut egui::Ui, color: Color32) {
+pub(crate) fn status_dot(ui: &mut egui::Ui, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
     ui.painter().circle_filled(rect.center(), 4.0, color);
 }
 
-fn neon_button(ui: &mut egui::Ui, text: &str, hot: bool) -> egui::Response {
+pub(crate) fn neon_button(ui: &mut egui::Ui, text: &str, hot: bool) -> egui::Response {
     let (fg, stroke, fill) = if hot { (DEEP, RED, RED) } else { (CYAN, CYAN, Color32::TRANSPARENT) };
     ui.add(
         egui::Button::new(RichText::new(text).color(fg).strong())
@@ -255,6 +314,7 @@ impl eframe::App for Panel {
                     }
                     match self.tab {
                         Tab::Brain => self.brain_tab(ui),
+                        Tab::Voice => self.voice_tab(ui),
                         Tab::Body => self.body_tab(ui),
                         Tab::Persona => self.persona_tab(ui),
                         Tab::Safety => self.safety_tab(ui),
