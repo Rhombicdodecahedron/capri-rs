@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use capri_application::ports::SkinRepository;
-use capri_application::services::{ChatService, DeskService, ToolRunner, VoiceService};
+use capri_application::services::{DeskService, VoiceService};
 use capri_config::Config;
 use capri_desk_winit::{DeskHooks, DeskOptions, Reload};
 use capri_domain::{Character, CharacterConfig};
@@ -53,10 +53,10 @@ pub fn run(
     config_path: PathBuf,
     data: PathBuf,
     skins: Arc<dyn SkinRepository>,
-    chat: Arc<ChatService>,
-    tools: Arc<ToolRunner>,
+    powers: crate::Powers,
     rt: &tokio::runtime::Runtime,
 ) -> anyhow::Result<()> {
+    let crate::Powers { chat, tools, hands } = powers;
     let devices = crate::voice::Devices::new(cfg.voice.volume);
     let voice = {
         let _inside = rt.enter();
@@ -107,6 +107,9 @@ pub fn run(
             Err(e) => tracing::warn!(error = %format!("{e:#}"), "keeping the current brain"),
         }
         tools.set_mode(cfg.safety.approval);
+        if let Some(h) = &hands {
+            h.configure(cfg.safety.app_control, cfg.safety.never_touch.clone());
+        }
         reload_chat.set_language(cfg.ui.language.resolve(sys_locale::get_locale().as_deref()));
         let chat = reload_chat.clone();
         let persona = cfg.persona.persona();

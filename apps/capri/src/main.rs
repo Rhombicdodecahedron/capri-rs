@@ -11,8 +11,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
-use capri_application::ports::{MemoryStore, SkinRepository};
-use capri_application::services::{ChatEvent, ChatService, ChatSettings, ToolRunner};
+use capri_application::ports::{MemoryStore, SkinRepository, UiDriver};
+use capri_application::services::{
+    ChatEvent, ChatService, ChatSettings, Hands, RememberTool, SpotifyRemote, ToolRunner,
+};
 use capri_config::Config;
 use capri_memory_sqlite::SqliteMemory;
 use capri_settings_egui::{SettingsInput, SkinChoice};
@@ -110,13 +112,13 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Chat => {
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(terminal_chat(chat_service(&cfg, &p)?.0))
+            rt.block_on(terminal_chat(chat_service(&cfg, &p)?.chat))
         }
         Command::Desk => {
             let rt = tokio::runtime::Runtime::new()?;
-            let (chat, tools) = chat_service(&cfg, &p)?;
-            rt.block_on(chat.resume());
-            desk::run(&cfg, p.config.clone(), p.data.clone(), skins, chat, tools, &rt)
+            let powers = chat_service(&cfg, &p)?;
+            rt.block_on(powers.chat.resume());
+            desk::run(&cfg, p.config.clone(), p.data.clone(), skins, powers, &rt)
         }
         Command::Settings { test } => {
             let rt = tokio::runtime::Runtime::new()?;
@@ -156,30 +158,52 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Until the chat box can ask, anything that needs a yes is declined (music commands typed or said
-/// by the user never need one).
+/// Calls that don't come from a chat have no one to ask: anything that needs a yes is declined.
+/// (Everything she does for a typed or spoken line asks in that chat instead.)
 #[derive(Debug)]
-struct DeclineForNow;
+struct NoOneToAsk;
 
 #[async_trait::async_trait]
-impl capri_application::ports::ApprovalPrompt for DeclineForNow {
+impl capri_application::ports::ApprovalPrompt for NoOneToAsk {
     async fn ask(&self, request: &capri_application::ports::ActionRequest) -> bool {
-        tracing::info!(tool = %request.tool, summary = %request.summary, "declined: no approval prompt yet");
+        tracing::info!(tool = %request.tool, summary = %request.summary, "declined: no chat to ask in");
         false
     }
 }
 
-fn chat_service(cfg: &Config, p: &Paths) -> anyhow::Result<(Arc<ChatService>, Arc<ToolRunner>)> {
+/// The chat and the parts of her powers the settings can change live.
+#[derive(Debug)]
+pub struct Powers {
+    pub chat: Arc<ChatService>,
+    pub tools: Arc<ToolRunner>,
+    /// Her hands on other apps, when this system has them.
+    pub hands: Option<Arc<Hands>>,
+}
+
+fn chat_service(cfg: &Config, p: &Paths) -> anyhow::Result<Powers> {
     let model = brain::from_config(cfg)?.model();
     let db = cfg.memory.path.clone().unwrap_or_else(|| p.data.join("memory.sqlite"));
     let memory: Arc<dyn MemoryStore> =
         Arc::new(SqliteMemory::open(&db).with_context(|| format!("opening {}", db.display()))?);
     let lang = cfg.ui.language.resolve(sys_locale::get_locale().as_deref());
     let settings = ChatSettings { persona: cfg.persona.persona(), lang, ..ChatSettings::default() };
-    let tools = Arc::new(
-        ToolRunner::new(cfg.safety.approval, Arc::new(DeclineForNow)).with(Arc::new(capri_media_os::MediaKeys)),
-    );
-    Ok((Arc::new(ChatService::new(model, memory, settings).with_tools(tools.clone())), tools))
+    let mut tools = ToolRunner::new(cfg.safety.approval, Arc::new(NoOneToAsk))
+        .with(Arc::new(capri_media_os::MediaKeys))
+        .with(Arc::new(RememberTool::new(memory.clone())))
+        .with_all(capri_system_os::tools());
+    let mut hands = None;
+    if capri_ui_windows::AVAILABLE {
+        let ui: Arc<dyn UiDriver> = Arc::new(capri_ui_windows::Automation);
+        tools = tools.with(Arc::new(SpotifyRemote::new(ui.clone(), Arc::new(capri_system_os::SystemOpener))));
+        let h = Hands::new(ui, cfg.safety.never_touch.clone());
+        h.configure(cfg.safety.app_control, cfg.safety.never_touch.clone());
+        tools = tools.with_all(h.tools());
+        hands = Some(h);
+    }
+    let tools = Arc::new(tools);
+    tracing::info!(tools = ?tools.specs().iter().map(|t| t.name.clone()).collect::<Vec<_>>(), "powers ready");
+    let chat = Arc::new(ChatService::new(model, memory, settings).with_tools(tools.clone()));
+    Ok(Powers { chat, tools, hands })
 }
 
 async fn terminal_chat(chat: Arc<ChatService>) -> anyhow::Result<()> {
@@ -193,27 +217,45 @@ async fn terminal_chat(chat: Arc<ChatService>) -> anyhow::Result<()> {
         if matches!(line.trim(), "/quit" | "/exit") {
             break;
         }
-        let mut started = false;
-        chat.send(&line, |e| match e {
-            ChatEvent::Thinking => {}
-            ChatEvent::Delta(d) => {
-                if !started {
-                    print!("capri > ");
-                    started = true;
+        // the reply runs on its own task: when she asks a yes/no question, the loop reads the
+        // answer while the reply waits for it
+        let (asked_tx, mut asked) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let chat = chat.clone();
+        let mut reply = tokio::spawn(async move {
+            let mut started = false;
+            chat.send(&line, |e| match e {
+                ChatEvent::Thinking => {}
+                ChatEvent::Delta(d) => {
+                    if !started {
+                        print!("capri > ");
+                        started = true;
+                    }
+                    print!("{d}");
+                    let _ = std::io::stdout().flush();
                 }
-                print!("{d}");
-                let _ = std::io::stdout().flush();
-            }
-            ChatEvent::Done(full) => {
-                if started {
-                    println!();
-                } else {
-                    println!("capri > {full}");
+                ChatEvent::Confirm(q) => {
+                    if started {
+                        println!();
+                        started = false;
+                    }
+                    println!("capri ? {q}");
+                    let _ = asked_tx.send(());
                 }
-            }
-            ChatEvent::Failed(err) => println!("[brain offline] {}", err.detail),
-        })
-        .await;
+                ChatEvent::Done(full) => {
+                    if started {
+                        println!();
+                    } else {
+                        println!("capri > {full}");
+                    }
+                }
+                ChatEvent::Failed(err) => println!("[brain offline] {}", err.detail),
+            })
+            .await;
+        });
+        tokio::select! {
+            _ = &mut reply => {}
+            Some(()) = asked.recv() => {}
+        }
     }
     Ok(())
 }

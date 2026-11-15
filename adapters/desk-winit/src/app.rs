@@ -135,6 +135,10 @@ impl App {
                 match &e {
                     ChatEvent::Delta(d) => voice.say_streamed(d),
                     ChatEvent::Done(_) => voice.say_done(),
+                    ChatEvent::Confirm(q) => {
+                        voice.say_streamed(q);
+                        voice.say_done();
+                    }
                     _ => {}
                 }
                 let _ = proxy.send_event(UiEvent::Chat(e));
@@ -507,6 +511,7 @@ impl ApplicationHandler<UiEvent> for App {
             UiEvent::Chat(ChatEvent::Thinking) => {}
             UiEvent::Chat(ChatEvent::Delta(d)) => s.bubble.push_reply(&d),
             UiEvent::Chat(ChatEvent::Done(full)) => s.bubble.finish(full, now),
+            UiEvent::Chat(ChatEvent::Confirm(question)) => s.bubble.ask(question, now),
             UiEvent::Chat(ChatEvent::Failed(f)) => {
                 tracing::warn!(detail = %f.detail, "reply failed");
                 let l = s.painter.lang;

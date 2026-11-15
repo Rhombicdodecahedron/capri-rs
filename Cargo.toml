@@ -15,6 +15,8 @@ members = [
     "adapters/speech-cloud",
     "adapters/speech-whisper",
     "adapters/media-os",
+    "adapters/ui-windows",
+    "adapters/system-os",
     "apps/capri",
 ]
 
@@ -40,6 +42,8 @@ capri-audio-cpal = { path = "adapters/audio-cpal" }
 capri-speech-cloud = { path = "adapters/speech-cloud" }
 capri-speech-whisper = { path = "adapters/speech-whisper" }
 capri-media-os = { path = "adapters/media-os" }
+capri-ui-windows = { path = "adapters/ui-windows" }
+capri-system-os = { path = "adapters/system-os" }
 
 anyhow = "1"
 async-trait = "0.1"

@@ -111,6 +111,12 @@ impl Bubble {
         self.state = BubbleState::Saying { text: full, done: true };
     }
 
+    /// A yes/no question: it stays up while she waits for the answer (typed or said).
+    pub fn ask(&mut self, question: String, now: f32) {
+        self.hide_at = Some(now + 90.0);
+        self.state = BubbleState::Saying { text: question, done: true };
+    }
+
     pub fn fail(&mut self, error: String, now: f32) {
         self.hide_at = Some(now + 8.0);
         self.state = BubbleState::Error(error);
