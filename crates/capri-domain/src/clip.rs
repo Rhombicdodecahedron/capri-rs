@@ -20,6 +20,34 @@ pub enum ClipId {
     PerchBlink,
     PerchBlinkGlitch,
     PerchGlitch,
+    /// Lying down, eyes shut (dozing, or a blink).
+    Lay,
+    /// Lying down, eyes open.
+    LayAwake,
+    /// Lying down and talking, mouth open (two frames to flap between).
+    LayTalk,
+    LayTalk2,
+    /// Her mini form, a little screen with her eyes: looking at you.
+    MiniIdle,
+    MiniBlink,
+    MiniTalk,
+    MiniTalk2,
+    MiniAnnoyed,
+    MiniAnnoyedTalk,
+    MiniLookLeft,
+    MiniLookRight,
+    MiniGlitch,
+}
+
+/// How a clip's art is laid out and sized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipKind {
+    /// A horizontal strip of frames, `height_ratio` times her size tall.
+    Strip,
+    /// One large picture of her lying down, scaled so her body is about as long as she is tall.
+    LayPose,
+    /// One picture of her mini face, a small screen sitting on the taskbar or a window.
+    MiniFace,
 }
 
 /// How a clip plays once it reaches its last frame.
@@ -50,7 +78,7 @@ impl ClipSpec {
 }
 
 impl ClipId {
-    pub const ALL: [ClipId; 13] = [
+    pub const ALL: [ClipId; 26] = [
         ClipId::Idle,
         ClipId::Blink,
         ClipId::BlinkGlitch,
@@ -64,9 +92,22 @@ impl ClipId {
         ClipId::PerchBlink,
         ClipId::PerchBlinkGlitch,
         ClipId::PerchGlitch,
+        ClipId::Lay,
+        ClipId::LayAwake,
+        ClipId::LayTalk,
+        ClipId::LayTalk2,
+        ClipId::MiniIdle,
+        ClipId::MiniBlink,
+        ClipId::MiniTalk,
+        ClipId::MiniTalk2,
+        ClipId::MiniAnnoyed,
+        ClipId::MiniAnnoyedTalk,
+        ClipId::MiniLookLeft,
+        ClipId::MiniLookRight,
+        ClipId::MiniGlitch,
     ];
 
-    /// File stem of the sprite strip, e.g. `perch_blink` for `perch_blink.png`.
+    /// File stem of the art, e.g. `perch_blink` for `perch_blink.png`; mini looks live in `mini/`.
     pub fn file_stem(self) -> &'static str {
         match self {
             ClipId::Idle => "idle",
@@ -82,6 +123,55 @@ impl ClipId {
             ClipId::PerchBlink => "perch_blink",
             ClipId::PerchBlinkGlitch => "perch_blink_glitch",
             ClipId::PerchGlitch => "perch_glitch",
+            ClipId::Lay => "lay",
+            ClipId::LayAwake => "lay_awake",
+            ClipId::LayTalk => "lay_talk",
+            ClipId::LayTalk2 => "lay_talk2",
+            ClipId::MiniIdle => "mini/idle",
+            ClipId::MiniBlink => "mini/blink",
+            ClipId::MiniTalk => "mini/talk",
+            ClipId::MiniTalk2 => "mini/talk2",
+            ClipId::MiniAnnoyed => "mini/annoyed",
+            ClipId::MiniAnnoyedTalk => "mini/annoyed_talk",
+            ClipId::MiniLookLeft => "mini/look_left",
+            ClipId::MiniLookRight => "mini/look_right",
+            ClipId::MiniGlitch => "mini/glitch",
+        }
+    }
+
+    pub fn kind(self) -> ClipKind {
+        match self {
+            ClipId::Lay | ClipId::LayAwake | ClipId::LayTalk | ClipId::LayTalk2 => ClipKind::LayPose,
+            ClipId::MiniIdle
+            | ClipId::MiniBlink
+            | ClipId::MiniTalk
+            | ClipId::MiniTalk2
+            | ClipId::MiniAnnoyed
+            | ClipId::MiniAnnoyedTalk
+            | ClipId::MiniLookLeft
+            | ClipId::MiniLookRight
+            | ClipId::MiniGlitch => ClipKind::MiniFace,
+            _ => ClipKind::Strip,
+        }
+    }
+
+    /// The look to borrow when a skin doesn't draw this one. `None`: nothing close enough (a skin
+    /// without `lay_awake` simply doesn't lie down, one without `mini/idle` has no mini form).
+    pub fn fallback(self) -> Option<ClipId> {
+        match self {
+            ClipId::Idle | ClipId::Mouth | ClipId::LayAwake | ClipId::MiniIdle => None,
+            ClipId::PerchBlink | ClipId::PerchBlinkGlitch | ClipId::PerchGlitch => Some(ClipId::Perch),
+            ClipId::BlinkGlitch => Some(ClipId::Blink),
+            ClipId::Lay | ClipId::LayTalk => Some(ClipId::LayAwake),
+            ClipId::LayTalk2 => Some(ClipId::LayTalk),
+            ClipId::MiniTalk2 | ClipId::MiniAnnoyedTalk => Some(ClipId::MiniTalk),
+            ClipId::MiniBlink
+            | ClipId::MiniTalk
+            | ClipId::MiniAnnoyed
+            | ClipId::MiniLookLeft
+            | ClipId::MiniLookRight
+            | ClipId::MiniGlitch => Some(ClipId::MiniIdle),
+            _ => Some(ClipId::Idle),
         }
     }
 
@@ -103,6 +193,8 @@ impl ClipId {
             ClipId::Perch => (16, 8.0, 1.0, Playback::Loop),
             ClipId::PerchBlink | ClipId::PerchBlinkGlitch => (4, 8.0, 1.0, Playback::Overlay),
             ClipId::PerchGlitch => (10, 15.0, 1.0, Playback::Times(1)),
+            // single pictures, sized by their kind (see ClipKind)
+            _ => (1, 1.0, 1.0, Playback::Loop),
         };
         ClipSpec { id: self, frames, fps, height_ratio, playback }
     }
@@ -118,6 +210,17 @@ mod tests {
         stems.sort_unstable();
         stems.dedup();
         assert_eq!(stems.len(), ClipId::ALL.len());
+    }
+
+    #[test]
+    fn rest_looks_fall_back_within_their_family() {
+        assert_eq!(ClipId::LayTalk2.fallback(), Some(ClipId::LayTalk));
+        assert_eq!(ClipId::LayAwake.fallback(), None, "no lying art: she just doesn't lie down");
+        assert_eq!(ClipId::MiniAnnoyedTalk.fallback(), Some(ClipId::MiniTalk));
+        assert_eq!(ClipId::MiniLookLeft.fallback(), Some(ClipId::MiniIdle));
+        assert_eq!(ClipId::MiniIdle.fallback(), None);
+        assert_eq!(ClipId::Lay.kind(), ClipKind::LayPose);
+        assert_eq!(ClipId::MiniGlitch.file_stem(), "mini/glitch");
     }
 
     #[test]
