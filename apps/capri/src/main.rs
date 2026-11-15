@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use capri_application::ports::{MemoryStore, SkinRepository};
-use capri_application::services::{ChatEvent, ChatService, ChatSettings};
+use capri_application::services::{ChatEvent, ChatService, ChatSettings, ToolRunner};
 use capri_config::Config;
 use capri_memory_sqlite::SqliteMemory;
 use capri_settings_egui::{SettingsInput, SkinChoice};
@@ -110,13 +110,13 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Chat => {
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(terminal_chat(chat_service(&cfg, &p)?))
+            rt.block_on(terminal_chat(chat_service(&cfg, &p)?.0))
         }
         Command::Desk => {
             let rt = tokio::runtime::Runtime::new()?;
-            let chat = chat_service(&cfg, &p)?;
+            let (chat, tools) = chat_service(&cfg, &p)?;
             rt.block_on(chat.resume());
-            desk::run(&cfg, p.config.clone(), p.data.clone(), skins, chat, &rt)
+            desk::run(&cfg, p.config.clone(), p.data.clone(), skins, chat, tools, &rt)
         }
         Command::Settings { test } => {
             let rt = tokio::runtime::Runtime::new()?;
@@ -156,13 +156,30 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn chat_service(cfg: &Config, p: &Paths) -> anyhow::Result<Arc<ChatService>> {
+/// Until the chat box can ask, anything that needs a yes is declined (music commands typed or said
+/// by the user never need one).
+#[derive(Debug)]
+struct DeclineForNow;
+
+#[async_trait::async_trait]
+impl capri_application::ports::ApprovalPrompt for DeclineForNow {
+    async fn ask(&self, request: &capri_application::ports::ActionRequest) -> bool {
+        tracing::info!(tool = %request.tool, summary = %request.summary, "declined: no approval prompt yet");
+        false
+    }
+}
+
+fn chat_service(cfg: &Config, p: &Paths) -> anyhow::Result<(Arc<ChatService>, Arc<ToolRunner>)> {
     let model = brain::from_config(cfg)?.model();
     let db = cfg.memory.path.clone().unwrap_or_else(|| p.data.join("memory.sqlite"));
     let memory: Arc<dyn MemoryStore> =
         Arc::new(SqliteMemory::open(&db).with_context(|| format!("opening {}", db.display()))?);
-    let settings = ChatSettings { persona: cfg.persona.persona(), ..ChatSettings::default() };
-    Ok(Arc::new(ChatService::new(model, memory, settings)))
+    let lang = cfg.ui.language.resolve(sys_locale::get_locale().as_deref());
+    let settings = ChatSettings { persona: cfg.persona.persona(), lang, ..ChatSettings::default() };
+    let tools = Arc::new(
+        ToolRunner::new(cfg.safety.approval, Arc::new(DeclineForNow)).with(Arc::new(capri_media_os::MediaKeys)),
+    );
+    Ok((Arc::new(ChatService::new(model, memory, settings).with_tools(tools.clone())), tools))
 }
 
 async fn terminal_chat(chat: Arc<ChatService>) -> anyhow::Result<()> {

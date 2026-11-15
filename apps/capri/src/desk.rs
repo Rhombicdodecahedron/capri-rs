@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use capri_application::ports::SkinRepository;
-use capri_application::services::{ChatService, DeskService, VoiceService};
+use capri_application::services::{ChatService, DeskService, ToolRunner, VoiceService};
 use capri_config::Config;
 use capri_desk_winit::{DeskHooks, DeskOptions, Reload};
 use capri_domain::{Character, CharacterConfig};
@@ -54,6 +54,7 @@ pub fn run(
     data: PathBuf,
     skins: Arc<dyn SkinRepository>,
     chat: Arc<ChatService>,
+    tools: Arc<ToolRunner>,
     rt: &tokio::runtime::Runtime,
 ) -> anyhow::Result<()> {
     let devices = crate::voice::Devices::new(cfg.voice.volume);
@@ -105,6 +106,8 @@ pub fn run(
             Ok(b) => reload_chat.set_model(b.model()),
             Err(e) => tracing::warn!(error = %format!("{e:#}"), "keeping the current brain"),
         }
+        tools.set_mode(cfg.safety.approval);
+        reload_chat.set_language(cfg.ui.language.resolve(sys_locale::get_locale().as_deref()));
         let chat = reload_chat.clone();
         let persona = cfg.persona.persona();
         handle.spawn(async move { chat.set_persona(persona).await });

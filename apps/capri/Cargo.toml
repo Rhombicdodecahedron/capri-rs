@@ -33,6 +33,7 @@ capri-settings-egui = { workspace = true }
 capri-audio-cpal = { workspace = true }
 capri-speech-cloud = { workspace = true }
 capri-speech-whisper = { workspace = true }
+capri-media-os = { workspace = true }
 reqwest = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
