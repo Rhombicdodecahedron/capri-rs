@@ -18,6 +18,9 @@ pub enum ToolError {
     Unknown(String),
     #[error("bad arguments: {0}")]
     BadArguments(String),
+    /// This tool can't do it right now (the app isn't open...): the caller may try another way.
+    #[error("unavailable: {0}")]
+    Unavailable(String),
     #[error("the user said no")]
     Declined,
     #[error("blocked by the read-only setting")]
@@ -30,6 +33,29 @@ pub enum ToolError {
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
+
+    /// Switched off in the settings: not offered to the model, and refused if called.
+    fn enabled(&self) -> bool {
+        true
+    }
+
+    /// The risk of this particular call. Defaults to the spec's; tools whose risk depends on the
+    /// target (which button, which keys) raise it here.
+    fn risk(&self, args: &serde_json::Value) -> Risk {
+        let _ = args;
+        self.spec().risk
+    }
+
+    /// One line saying what this call will do, for the approval question.
+    fn describe(&self, args: &serde_json::Value) -> String {
+        let args = args.to_string();
+        let args = if args.chars().count() > 160 {
+            format!("{}…", args.chars().take(160).collect::<String>())
+        } else {
+            args
+        };
+        format!("{} {args}", self.spec().name)
+    }
 
     async fn run(&self, args: serde_json::Value) -> Result<String, ToolError>;
 }
