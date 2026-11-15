@@ -133,14 +133,55 @@ impl Live {
         self.clock.elapsed().as_secs_f32()
     }
 
+    /// The pointer in screen pixels. Asked from the OS when it can tell: the window moves under the
+    /// pointer while she is dragged, so window-relative positions lag one frame behind and jitter.
     fn cursor_screen(&self) -> Point {
-        Point::new(self.origin.0 as f32 + self.cursor.x as f32, self.origin.1 as f32 + self.cursor.y as f32)
+        present::os_cursor().map_or_else(
+            || Point::new(self.origin.0 as f32 + self.cursor.x as f32, self.origin.1 as f32 + self.cursor.y as f32),
+            |(x, y)| Point::new(x, y),
+        )
+    }
+
+    /// The pointer on her canvas.
+    fn cursor_local(&self) -> (f32, f32) {
+        let p = self.cursor_screen();
+        (p.x - self.origin.0 as f32, p.y - self.origin.1 as f32)
+    }
+
+    /// Follows the pointer while the button is held: past a few pixels a press becomes a drag.
+    fn pointer_moved(&mut self, now: f32) {
+        let screen = self.cursor_screen();
+        self.trail.push((now, screen));
+        self.trail.retain(|(t, _)| now - t < 0.1);
+        let Some(mut press) = self.press else { return };
+        let moved = (screen.x - press.at_screen.x).hypot(screen.y - press.at_screen.y);
+        if !press.dragging && !press.on_bubble && moved > DRAG_THRESHOLD {
+            press.dragging = true;
+            self.desk.character_mut().grab(now);
+            // measured after grab: picking her up off a window shifts her to hang from the hand
+            let her = self.desk.character().position();
+            press.grab_offset = Point::new(her.x - press.at_screen.x, her.y - press.at_screen.y);
+        }
+        if press.dragging {
+            self.desk
+                .character_mut()
+                .drag_to(Point::new(screen.x + press.grab_offset.x, screen.y + press.grab_offset.y));
+        }
+        self.press = Some(press);
     }
 
     fn frame(&mut self) {
         let now = self.now();
         let dt = now - self.last_tick;
         self.last_tick = now;
+        if self.press.is_some() {
+            // a release that happened outside her window (fast throw) must not leave her stuck in the air
+            if present::os_left_button_down() == Some(false) {
+                self.release(now);
+            } else {
+                self.pointer_moved(now);
+            }
+        }
         self.bubble.tick(now);
         let talking = self.bubble.talking(now);
         let c = self.desk.character_mut();
@@ -172,8 +213,41 @@ impl Live {
     }
 
     fn on_her(&self) -> bool {
-        let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
+        let (x, y) = self.cursor_local();
         self.painter.bubble_rect.is_some_and(|r| r.contains(x, y)) || self.painter.alpha_at(x, y) > 40
+    }
+
+    fn press(&mut self) {
+        let (x, y) = self.cursor_local();
+        let on_bubble = self.painter.bubble_rect.is_some_and(|r| r.contains(x, y));
+        self.trail.clear();
+        self.press =
+            Some(Press { at_screen: self.cursor_screen(), grab_offset: Point::default(), dragging: false, on_bubble });
+    }
+
+    /// Button up: a throw if she was being dragged, otherwise a click (double click pokes her).
+    fn release(&mut self, now: f32) {
+        let Some(press) = self.press.take() else { return };
+        if press.dragging {
+            let v = velocity(&self.trail);
+            self.desk.character_mut().release(v, now);
+            return;
+        }
+        if press.on_bubble {
+            return;
+        }
+        if now - self.last_click < DOUBLE_CLICK {
+            self.desk.character_mut().poke(now);
+            self.last_click = f32::NEG_INFINITY;
+            return;
+        }
+        if self.bubble.is_typing() {
+            self.bubble.close();
+        } else {
+            self.bubble.open_typing();
+            self.window.focus_window();
+        }
+        self.last_click = now;
     }
 }
 
@@ -292,53 +366,14 @@ impl ApplicationHandler<UiEvent> for App {
             WindowEvent::RedrawRequested => s.frame(),
             WindowEvent::CursorMoved { position, .. } => {
                 s.cursor = position;
-                let screen = s.cursor_screen();
-                s.trail.push((now, screen));
-                s.trail.retain(|(t, _)| now - t < 0.12);
-                if let Some(mut press) = s.press {
-                    let moved = (screen.x - press.at_screen.x).hypot(screen.y - press.at_screen.y);
-                    if !press.dragging && !press.on_bubble && moved > 6.0 {
-                        press.dragging = true;
-                        s.desk.character_mut().grab(now);
-                    }
-                    if press.dragging {
-                        let p = Point::new(screen.x + press.grab_offset.x, screen.y + press.grab_offset.y);
-                        s.desk.character_mut().drag_to(p);
-                    }
-                    s.press = Some(press);
-                }
+                s.pointer_moved(now);
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                 if s.presenter.clicks_pass_through_transparency() || s.on_her() {
-                    let at = s.cursor_screen();
-                    let her = s.desk.character().position();
-                    let on_bubble =
-                        s.painter.bubble_rect.is_some_and(|r| r.contains(s.cursor.x as f32, s.cursor.y as f32));
-                    s.press = Some(Press {
-                        at_screen: at,
-                        grab_offset: Point::new(her.x - at.x, her.y - at.y),
-                        dragging: false,
-                        on_bubble,
-                    });
+                    s.press();
                 }
             }
-            WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
-                let Some(press) = s.press.take() else { return };
-                if press.dragging {
-                    let v = velocity(&s.trail);
-                    s.desk.character_mut().release(v, now);
-                } else if !press.on_bubble {
-                    if now - s.last_click < 0.35 {
-                        s.desk.character_mut().poke(now);
-                    } else if s.bubble.is_typing() {
-                        s.bubble.close();
-                    } else {
-                        s.bubble.open_typing();
-                        s.window.focus_window();
-                    }
-                    s.last_click = now;
-                }
-            }
+            WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => s.release(now),
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Right, .. } => {
                 if s.presenter.clicks_pass_through_transparency() || s.on_her() {
                     (self.hooks.open_settings)();
@@ -399,7 +434,11 @@ impl ApplicationHandler<UiEvent> for App {
     }
 }
 
-/// Pointer velocity over the last ~120 ms, in px/s, for tossing her.
+/// Pixels the pointer must travel before a press becomes a drag (a shaky click stays a click).
+const DRAG_THRESHOLD: f32 = 9.0;
+const DOUBLE_CLICK: f32 = 0.35;
+
+/// Pointer velocity over the last ~100 ms, in px/s, for tossing her.
 fn velocity(trail: &[(f32, Point)]) -> Point {
     match (trail.first(), trail.last()) {
         (Some((t0, a)), Some((t1, b))) if t1 - t0 > 0.01 => {

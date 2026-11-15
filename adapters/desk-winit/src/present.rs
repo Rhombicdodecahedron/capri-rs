@@ -31,6 +31,30 @@ pub fn native_id(window: &Window) -> u64 {
 }
 
 #[allow(clippy::needless_pass_by_value)] // consumed by softbuffer, only borrowed on Windows
+/// The pointer position in screen pixels, where the OS can tell (Windows).
+pub fn os_cursor() -> Option<(f32, f32)> {
+    #[cfg(windows)]
+    {
+        layered::cursor()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// Whether the left button is down right now, where the OS can tell (Windows).
+pub fn os_left_button_down() -> Option<bool> {
+    #[cfg(windows)]
+    {
+        Some(layered::left_button_down())
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 pub fn create(window: Arc<Window>) -> Box<dyn Presenter> {
     #[cfg(windows)]
     {
@@ -110,11 +134,23 @@ mod layered {
         CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, HBITMAP, HDC, HGDIOBJ, ReleaseDC,
         SelectObject,
     };
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GWL_EXSTYLE, GetWindowLongW, SetWindowLongW, ULW_ALPHA, UpdateLayeredWindow, WS_EX_LAYERED,
+        GWL_EXSTYLE, GetCursorPos, GetWindowLongW, SetWindowLongW, ULW_ALPHA, UpdateLayeredWindow, WS_EX_LAYERED,
     };
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use winit::window::Window;
+
+    pub fn cursor() -> Option<(f32, f32)> {
+        let mut p = POINT { x: 0, y: 0 };
+        // SAFETY: writes into a local POINT.
+        (unsafe { GetCursorPos(&raw mut p) } != 0).then_some((p.x as f32, p.y as f32))
+    }
+
+    pub fn left_button_down() -> bool {
+        // SAFETY: reads global input state, no pointers involved. The high bit means "down now".
+        (unsafe { GetAsyncKeyState(i32::from(VK_LBUTTON)) } as u16) & 0x8000 != 0
+    }
 
     pub struct Layered {
         hwnd: HWND,

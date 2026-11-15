@@ -157,6 +157,10 @@ impl Character {
         if self.mode == Mode::Hidden {
             return;
         }
+        if self.mode == Mode::Perching {
+            // the seated anchor is her seat, the hanging one her feet: keep her head where it was
+            self.pos.y += self.cfg.size * 0.38;
+        }
         self.seat = None;
         self.touch(now);
         self.enter(Mode::Held, now);
