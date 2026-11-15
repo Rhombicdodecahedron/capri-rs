@@ -760,6 +760,13 @@ impl Panel {
                     d.roam_every_secs.1 = d.roam_every_secs.0;
                 }
             });
+            ui.checkbox(
+                &mut d.rests,
+                t(
+                    "Lies down and takes naps (mini, on the taskbar) by herself",
+                    "S'allonge et fait des siestes (en mini, sur la barre des tâches) toute seule",
+                ),
+            );
             label(ui, t("DOZES OFF AFTER (MINUTES IDLE)", "S'ENDORT APRÈS (MINUTES SANS RIEN)"));
             let mut minutes = d.sleep_after_secs / 60.0;
             if ui.add(egui::Slider::new(&mut minutes, 1.0..=60.0).step_by(1.0)).changed() {

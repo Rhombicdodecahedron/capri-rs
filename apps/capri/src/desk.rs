@@ -21,6 +21,7 @@ pub fn character(cfg: &Config) -> CharacterConfig {
         roaming: cfg.desk.roaming,
         roam_every: cfg.desk.roam_every_secs,
         sleep_after: cfg.desk.sleep_after_secs,
+        rests: cfg.desk.rests,
         ..CharacterConfig::default()
     }
 }

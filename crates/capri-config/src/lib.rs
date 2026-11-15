@@ -217,6 +217,8 @@ pub struct Desk {
     pub roaming: bool,
     pub roam_every_secs: (f32, f32),
     pub sleep_after_secs: f32,
+    /// She lies down on the taskbar or a window and takes naps in her mini form by herself.
+    pub rests: bool,
     pub fps: u32,
 }
 
@@ -228,6 +230,7 @@ impl Default for Desk {
             roaming: true,
             roam_every_secs: (18.0, 40.0),
             sleep_after_secs: 300.0,
+            rests: true,
             fps: 60,
         }
     }
@@ -387,6 +390,8 @@ size = 240
 roaming = true
 roam_every_secs = [18, 40]
 sleep_after_secs = 300
+# lies down and naps (mini, on the taskbar) by herself now and then
+rests = true
 fps = 60
 
 [persona]
