@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/capri-domain",
+    "crates/capri-application",
 ]
 
 [workspace.package]
@@ -13,6 +14,7 @@ repository = "https://github.com/Rhombicdodecahedron/capri-rs"
 
 [workspace.dependencies]
 capri-domain = { path = "crates/capri-domain" }
+capri-application = { path = "crates/capri-application" }
 
 anyhow = "1"
 async-trait = "0.1"
