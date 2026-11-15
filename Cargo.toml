@@ -10,6 +10,7 @@ members = [
     "adapters/desktop-windows",
     "adapters/memory-sqlite",
     "adapters/desk-winit",
+    "adapters/settings-egui",
 ]
 
 [workspace.package]
@@ -29,6 +30,7 @@ capri-skin-fs = { path = "adapters/skin-fs" }
 capri-desktop-windows = { path = "adapters/desktop-windows" }
 capri-memory-sqlite = { path = "adapters/memory-sqlite" }
 capri-desk-winit = { path = "adapters/desk-winit" }
+capri-settings-egui = { path = "adapters/settings-egui" }
 
 anyhow = "1"
 async-trait = "0.1"
