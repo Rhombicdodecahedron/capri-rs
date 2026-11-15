@@ -36,7 +36,7 @@ fn main() {
             let t = i as f32 / fps;
             let talking = !line.is_empty();
             let frame = animator.frame(t, talking, false, &mut rng);
-            let pose = Pose { mode, anchor: layout.anchor, frame, visible: true };
+            let pose = Pose { mode, anchor: layout.anchor, frame, visible: true, asleep: false };
             let head_up = if mode == Mode::Perching { 0.75 } else { 1.05 };
             let head = Point::new(layout.anchor.x, layout.anchor.y - size * head_up);
             painter.paint(&pose, head, &skin, &bubble, t);

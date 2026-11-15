@@ -2,7 +2,7 @@
 //! Pure drawing into a pixmap, so it can be rendered to a PNG in tests.
 
 use capri_application::ports::Skin;
-use capri_domain::{ClipId, Language, Point, Pose};
+use capri_domain::{ClipId, Language, Mode, Point, Pose};
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, PixmapPaint, PixmapRef, Stroke, Transform};
 
 use crate::bubble::{Bubble, BubbleState};
@@ -119,13 +119,51 @@ impl Painter {
                 // the chat box points at the top of what is actually drawn, standing or seated
                 head = Point::new(x + b.x + b.w / 2.0, y + b.y + b.h * 0.04);
             }
-            draw_sprite(&mut self.pixmap, f, x, y);
+            match pose.mode {
+                // lying down: a slow breath lifts her body a little
+                Mode::Lying => {
+                    let breath = 1.0 + 0.012 * (now * 1.2).sin();
+                    draw_sprite_scaled(&mut self.pixmap, f, x, y, (1.0, breath), (a.x, a.y));
+                }
+                // her mini screen hovers a little above its seat, bobbing and squishing as it breathes
+                Mode::Mini => {
+                    let u = self.layout.size * 0.4 / 100.0;
+                    let breath = (now * 1.9 + 0.6).sin();
+                    let lift = 3.0 * u - (now * 1.9).sin() * 2.5 * u;
+                    let squish = (1.0 - 0.025 * breath, 1.0 + 0.03 * breath);
+                    draw_sprite_scaled(&mut self.pixmap, f, x, y - lift, squish, (a.x, a.y - lift));
+                    head.y -= lift;
+                }
+                _ => draw_sprite(&mut self.pixmap, f, x, y),
+            }
             if let (Some(m), Some(mouth)) = (pose.frame.mouth, skin.strip(ClipId::Mouth)) {
                 let mf = &mouth.frames[(m as usize).min(mouth.frames.len() - 1)];
                 draw_sprite(&mut self.pixmap, mf, x, y);
             }
+            if pose.asleep {
+                let right = b.map_or(head.x, |b| x + b.x + b.w * if pose.mode == Mode::Lying { 0.75 } else { 0.62 });
+                self.paint_zs(Point::new(right, head.y), pose.mode, now);
+            }
         }
         self.paint_bubble(bubble, head, now);
+    }
+
+    /// Three z's drifting up from her head and fading, while she sleeps.
+    fn paint_zs(&mut self, from: Point, mode: Mode, now: f32) {
+        let u = match mode {
+            Mode::Mini => self.layout.size * 0.4 / 100.0,
+            _ => self.layout.size / 100.0 * 0.7,
+        };
+        for i in 0..3 {
+            let k = (now * 0.45 + i as f32 / 3.0).fract();
+            let px = ((8.0 + 7.0 * k) * u).max(6.0);
+            let alpha = (std::f32::consts::PI * k).sin() * 0.9;
+            let x = from.x + 10.0 * k * u + (k * 6.0).sin() * 2.0 * u;
+            let y = from.y - 26.0 * k * u;
+            let (r, g, b) = NEON_CYAN;
+            let color = Color::from_rgba8(r, g, b, (alpha.clamp(0.0, 1.0) * 255.0) as u8);
+            self.font.draw(&mut self.pixmap, "z", px, x, y, color);
+        }
     }
 
     fn paint_bubble(&mut self, bubble: &Bubble, head: Point, now: f32) {
@@ -230,6 +268,23 @@ fn opaque_bounds(sprite: &capri_application::ports::Sprite) -> Option<Rect> {
         }
     }
     (x0 <= x1).then(|| Rect { x: x0 as f32, y: y0 as f32, w: (x1 - x0 + 1) as f32, h: (y1 - y0 + 1) as f32 })
+}
+
+/// Draws a sprite at (x, y) stretched by `scale` around `origin` (canvas px).
+fn draw_sprite_scaled(
+    pm: &mut Pixmap,
+    sprite: &capri_application::ports::Sprite,
+    x: f32,
+    y: f32,
+    scale: (f32, f32),
+    origin: (f32, f32),
+) {
+    if let Some(src) = PixmapRef::from_bytes(&sprite.pixels, sprite.width, sprite.height) {
+        let (sx, sy) = scale;
+        let t = Transform::from_row(sx, 0.0, 0.0, sy, origin.0 * (1.0 - sx) + x * sx, origin.1 * (1.0 - sy) + y * sy);
+        let paint = PixmapPaint { quality: tiny_skia::FilterQuality::Bilinear, ..PixmapPaint::default() };
+        pm.draw_pixmap(0, 0, src, &paint, t, None);
+    }
 }
 
 fn draw_sprite(pm: &mut Pixmap, sprite: &capri_application::ports::Sprite, x: f32, y: f32) {
