@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use capri_application::ports::{Skin, SkinRepository};
 use capri_application::services::{ChatEvent, ChatService, DeskService, FailureKind, Heard, VoiceService};
-use capri_domain::{CharacterConfig, Language, Point, Rect};
+use capri_domain::{Abilities, CharacterConfig, Language, Point, Rect};
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use winit::application::ApplicationHandler;
@@ -304,7 +304,9 @@ impl Live {
             self.bubble.hold_until(now + 1.5);
         }
         let talking = self.bubble.talking(now) || speaking;
+        let pointer = self.cursor_screen();
         let c = self.desk.character_mut();
+        c.set_pointer(pointer);
         c.set_talking(talking, now);
         c.set_chat_open(self.bubble.is_open(), now);
         let started = Instant::now();
@@ -326,6 +328,9 @@ impl Live {
         let reskin = r.options.skin != self.skin.info.id || (size - self.painter.layout.size).abs() > 0.5;
         if reskin {
             self.skin = skins.load(&r.options.skin, size, 1.0).map_err(|e| e.to_string())?;
+            let abilities = abilities(&self.skin);
+            let now = self.now();
+            self.desk.character_mut().set_abilities(abilities, now);
             let layout = Layout::for_size(size);
             self.painter = Painter::new(layout);
             let _ = self.window.request_inner_size(PhysicalSize::new(layout.width, layout.height));
@@ -395,6 +400,9 @@ impl Live {
             self.last_click = f32::NEG_INFINITY;
             return;
         }
+        if self.desk.character_mut().clicked(now) {
+            tracing::debug!("poked three times: annoyed");
+        }
         if self.bubble.is_typing() {
             self.bubble.close();
         } else {
@@ -460,6 +468,7 @@ impl ApplicationHandler<UiEvent> for App {
         let mut painter = Painter::new(layout);
         painter.lang = self.options.lang;
         desk.set_own_windows(vec![present::native_id(&window)]);
+        desk.character_mut().set_abilities(abilities(&skin), 0.0);
         let presenter = present::create(window.clone());
         let clock = Instant::now();
         desk.start(0.0);
@@ -512,6 +521,10 @@ impl ApplicationHandler<UiEvent> for App {
             UiEvent::Chat(ChatEvent::Delta(d)) => s.bubble.push_reply(&d),
             UiEvent::Chat(ChatEvent::Done(full)) => s.bubble.finish(full, now),
             UiEvent::Chat(ChatEvent::Confirm(question)) => s.bubble.ask(question, now),
+            UiEvent::Chat(ChatEvent::Body(cmd)) => {
+                let done = s.desk.character_mut().command(cmd, now);
+                tracing::info!(?cmd, done, "body command");
+            }
             UiEvent::Chat(ChatEvent::Failed(f)) => {
                 tracing::warn!(detail = %f.detail, "reply failed");
                 let l = s.painter.lang;
@@ -617,6 +630,11 @@ impl ApplicationHandler<UiEvent> for App {
         let frame = Duration::from_secs_f64(1.0 / f64::from(self.options.fps.clamp(10, 144)));
         event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + frame));
     }
+}
+
+/// The rest poses the loaded skin draws.
+fn abilities(skin: &capri_application::ports::Skin) -> Abilities {
+    Abilities { lie_down: skin.can_lie_down(), mini: skin.has_mini() }
 }
 
 /// Pixels the pointer must travel before a press becomes a drag (a shaky click stays a click).

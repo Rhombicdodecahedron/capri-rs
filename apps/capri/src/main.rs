@@ -224,7 +224,7 @@ async fn terminal_chat(chat: Arc<ChatService>) -> anyhow::Result<()> {
         let mut reply = tokio::spawn(async move {
             let mut started = false;
             chat.send(&line, |e| match e {
-                ChatEvent::Thinking => {}
+                ChatEvent::Thinking | ChatEvent::Body(_) => {}
                 ChatEvent::Delta(d) => {
                     if !started {
                         print!("capri > ");

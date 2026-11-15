@@ -374,3 +374,14 @@ async fn no_answer_or_another_request_means_no() {
     let tool_turn = model.seen.lock().await[1].last().cloned().unwrap();
     assert!(tool_turn.content.contains("said no"), "{}", tool_turn.content);
 }
+
+#[tokio::test]
+async fn body_commands_reach_the_desk_without_the_model() {
+    let model = Arc::new(ScriptedModel { pieces: vec!["nope"], seen: Mutex::default() });
+    let settings = ChatSettings { lang: Language::Fr, ..ChatSettings::default() };
+    let chat = ChatService::new(model.clone(), Arc::new(VecMemory::default()), settings);
+    let events = run(&chat, "va faire une sieste stp").await;
+    assert_eq!(events[0], ChatEvent::Body(capri_domain::BodyCommand::Nap));
+    assert!(matches!(&events[1], ChatEvent::Done(r) if r.contains("Cinq minutes")));
+    assert!(model.seen.lock().await.is_empty(), "the brain wasn't asked");
+}

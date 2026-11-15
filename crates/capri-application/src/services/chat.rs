@@ -23,6 +23,8 @@ pub enum ChatEvent {
     Thinking,
     /// She needs a yes or no before doing something; the user's next line is the answer.
     Confirm(String),
+    /// Something for her body to do (nap, go mini, lie down, wake up); the desk carries it out.
+    Body(capri_domain::BodyCommand),
     Delta(String),
     Done(String),
     Failed(ChatFailure),
@@ -187,6 +189,11 @@ impl ChatService {
             if answer.is_some() {
                 return;
             }
+        }
+        if let Some(cmd) = capri_domain::body::parse(line) {
+            emit(ChatEvent::Body(cmd));
+            emit(ChatEvent::Done(cmd.reply(l).to_string()));
+            return;
         }
         if let Some(cmd) = media::parse(line) {
             if let Some(reply) = self.media(&cmd, l).await {
