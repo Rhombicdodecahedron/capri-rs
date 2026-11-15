@@ -10,6 +10,7 @@ use capri_domain::{
 use tokio::sync::Mutex;
 
 use crate::ports::*;
+use crate::services::MEDIA_TOOL;
 use crate::services::*;
 
 struct ScriptedModel {
@@ -239,4 +240,51 @@ fn desk_follows_a_dragged_window_every_frame() {
     }
     let moved = desk.character().position().x - before;
     assert!((moved - 50.0).abs() < 0.5, "moved {moved}");
+}
+
+struct MediaSpy(std::sync::Mutex<Vec<serde_json::Value>>);
+
+#[async_trait]
+impl Tool for MediaSpy {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: MEDIA_TOOL.into(),
+            description: "music".into(),
+            parameters: serde_json::json!({}),
+            risk: Risk::Reversible,
+        }
+    }
+
+    async fn run(&self, args: serde_json::Value) -> Result<String, ToolError> {
+        self.0.lock().unwrap().push(args);
+        Ok("ok".into())
+    }
+}
+
+#[tokio::test]
+async fn music_commands_skip_the_model_and_answer_in_french() {
+    let model = Arc::new(ScriptedModel { pieces: vec!["nope"], seen: Mutex::default() });
+    let spy = Arc::new(MediaSpy(std::sync::Mutex::default()));
+    let tools =
+        Arc::new(ToolRunner::new(ApprovalMode::Ask, Arc::new(Answer(false, AtomicBool::new(false)))).with(spy.clone()));
+    let settings = ChatSettings { lang: capri_domain::Language::Fr, ..ChatSettings::default() };
+    let chat = ChatService::new(model.clone(), Arc::new(VecMemory::default()), settings).with_tools(tools);
+
+    let events = run(&chat, "chanson suivante").await;
+    assert_eq!(events, vec![ChatEvent::Done("Suivante.".into())]);
+    assert!(model.seen.lock().await.is_empty(), "no model round trip");
+    assert_eq!(spy.0.lock().unwrap()[0]["action"], "next");
+}
+
+#[tokio::test]
+async fn read_only_mode_keeps_hands_off_the_music() {
+    let model = Arc::new(ScriptedModel { pieces: vec!["nope"], seen: Mutex::default() });
+    let spy = Arc::new(MediaSpy(std::sync::Mutex::default()));
+    let tools = Arc::new(
+        ToolRunner::new(ApprovalMode::ReadOnly, Arc::new(Answer(true, AtomicBool::new(false)))).with(spy.clone()),
+    );
+    let chat = ChatService::new(model, Arc::new(VecMemory::default()), ChatSettings::default()).with_tools(tools);
+    let events = run(&chat, "pause").await;
+    assert!(matches!(&events[0], ChatEvent::Done(t) if t.contains("read-only")));
+    assert!(spy.0.lock().unwrap().is_empty());
 }

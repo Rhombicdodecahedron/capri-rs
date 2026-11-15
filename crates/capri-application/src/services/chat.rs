@@ -3,11 +3,15 @@
 use std::sync::Arc;
 
 use capri_domain::intent::{self, Intent};
-use capri_domain::{Conversation, Message, Persona};
+use capri_domain::{Conversation, Language, MediaCommand, Message, Origin, Persona, media};
 use futures::StreamExt;
 use tokio::sync::Mutex;
 
-use crate::ports::{LanguageModel, LlmError, MemoryStore};
+use crate::ports::{LanguageModel, LlmError, MemoryStore, ToolError};
+use crate::services::ToolRunner;
+
+/// Name of the music tool in the [`ToolRunner`].
+pub const MEDIA_TOOL: &str = "media";
 
 /// What the UI receives while a reply is being produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,11 +55,13 @@ pub struct ChatSettings {
     pub persona: Persona,
     pub history_turns: usize,
     pub recall_limit: usize,
+    /// Language of the replies she gives without the model (memory, music commands).
+    pub lang: Language,
 }
 
 impl Default for ChatSettings {
     fn default() -> Self {
-        Self { persona: Persona::default(), history_turns: 24, recall_limit: 6 }
+        Self { persona: Persona::default(), history_turns: 24, recall_limit: 6, lang: Language::En }
     }
 }
 
@@ -64,6 +70,8 @@ pub struct ChatService {
     memory: Arc<dyn MemoryStore>,
     conversation: Mutex<Conversation>,
     settings: ChatSettings,
+    lang: std::sync::RwLock<Language>,
+    tools: Option<Arc<ToolRunner>>,
 }
 
 impl std::fmt::Debug for ChatService {
@@ -75,7 +83,32 @@ impl std::fmt::Debug for ChatService {
 impl ChatService {
     pub fn new(model: Arc<dyn LanguageModel>, memory: Arc<dyn MemoryStore>, settings: ChatSettings) -> Self {
         let conversation = Conversation::new(settings.persona.clone(), settings.history_turns);
-        Self { model: std::sync::RwLock::new(model), memory, conversation: Mutex::new(conversation), settings }
+        let lang = std::sync::RwLock::new(settings.lang);
+        Self {
+            model: std::sync::RwLock::new(model),
+            memory,
+            conversation: Mutex::new(conversation),
+            settings,
+            lang,
+            tools: None,
+        }
+    }
+
+    /// Abilities she can use (music...). Every call goes through the runner's approval policy.
+    #[must_use]
+    pub fn with_tools(mut self, tools: Arc<ToolRunner>) -> Self {
+        self.tools = Some(tools);
+        self
+    }
+
+    pub fn set_language(&self, lang: Language) {
+        if let Ok(mut l) = self.lang.write() {
+            *l = lang;
+        }
+    }
+
+    fn lang(&self) -> Language {
+        self.lang.read().map_or(Language::En, |l| *l)
     }
 
     fn current_model(&self) -> Arc<dyn LanguageModel> {
@@ -115,28 +148,56 @@ impl ChatService {
         if line.is_empty() {
             return;
         }
+        let l = self.lang();
+        if let Some(cmd) = media::parse(line) {
+            if let Some(reply) = self.media(&cmd, l).await {
+                emit(ChatEvent::Done(reply));
+                return;
+            }
+        }
         match intent::parse(line) {
             Intent::NewChat => {
                 self.conversation.lock().await.clear();
-                emit(ChatEvent::Done("Fresh slate. What's next?".into()));
+                emit(ChatEvent::Done(l.pick("Fresh slate. What's next?", "On repart de zéro. Quoi de neuf ?").into()));
             }
             Intent::Remember(fact) => {
                 let reply = match self.memory.remember(&fact).await {
-                    Ok(()) => format!("Got it, I'll remember: {fact}"),
-                    Err(e) => format!("I couldn't save that ({e})."),
+                    Ok(()) => format!("{} {fact}", l.pick("Got it, I'll remember:", "C'est noté, je retiens :")),
+                    Err(e) => format!("{} ({e}).", l.pick("I couldn't save that", "Je n'ai pas pu l'enregistrer")),
                 };
                 emit(ChatEvent::Done(reply));
             }
             Intent::Forget(what) => {
                 let reply = match self.memory.forget(&what).await {
-                    Ok(0) => "I had nothing like that saved.".to_string(),
-                    Ok(n) => format!("Forgotten ({n})."),
-                    Err(e) => format!("I couldn't forget that ({e})."),
+                    Ok(0) => l.pick("I had nothing like that saved.", "Je n'avais rien de tel en mémoire.").to_string(),
+                    Ok(n) => format!("{} ({n}).", l.pick("Forgotten", "Oublié")),
+                    Err(e) => format!("{} ({e}).", l.pick("I couldn't forget that", "Je n'ai pas pu l'oublier")),
                 };
                 emit(ChatEvent::Done(reply));
             }
             Intent::Chat => self.chat(line, &mut emit).await,
         }
+    }
+
+    /// Runs a music command through the `media` tool. `None` when no such tool is plugged in: then
+    /// the line goes to the model like any other.
+    async fn media(&self, cmd: &MediaCommand, l: Language) -> Option<String> {
+        let tools = self.tools.as_ref()?;
+        if !tools.has(MEDIA_TOOL) {
+            return None;
+        }
+        let args = serde_json::to_value(cmd).unwrap_or_default();
+        Some(match tools.run(MEDIA_TOOL, args, Origin::User).await {
+            Ok(_) => cmd.reply(l),
+            Err(ToolError::Blocked) => l
+                .pick(
+                    "I'm in read-only mode, I can't touch your music.",
+                    "Je suis en lecture seule, je ne touche pas à ta musique.",
+                )
+                .into(),
+            Err(ToolError::Declined) => l.pick("Okay, I'll leave it.", "OK, je n'y touche pas.").into(),
+            Err(e) => format!("{} {e}", l.pick("That didn't work:", "Ça n'a pas marché :")),
+        })
     }
 
     async fn chat(&self, line: &str, emit: &mut (impl FnMut(ChatEvent) + Send)) {
