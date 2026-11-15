@@ -9,6 +9,7 @@ members = [
     "adapters/skin-fs",
     "adapters/desktop-windows",
     "adapters/memory-sqlite",
+    "adapters/desk-winit",
 ]
 
 [workspace.package]
@@ -27,6 +28,7 @@ capri-llm-claude-code = { path = "adapters/llm-claude-code" }
 capri-skin-fs = { path = "adapters/skin-fs" }
 capri-desktop-windows = { path = "adapters/desktop-windows" }
 capri-memory-sqlite = { path = "adapters/memory-sqlite" }
+capri-desk-winit = { path = "adapters/desk-winit" }
 
 anyhow = "1"
 async-trait = "0.1"
