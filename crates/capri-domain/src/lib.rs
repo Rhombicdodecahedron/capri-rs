@@ -6,6 +6,7 @@
 
 pub mod animator;
 pub mod approval;
+pub mod body;
 pub mod character;
 pub mod clip;
 pub mod conversation;
@@ -23,8 +24,9 @@ pub mod words;
 
 pub use animator::{Animator, Frame};
 pub use approval::{ApprovalMode, Decision, Origin, Risk};
-pub use character::{Character, CharacterConfig, Happening, Mode, Pose};
-pub use clip::{ClipId, ClipSpec, Playback};
+pub use body::BodyCommand;
+pub use character::{Abilities, Character, CharacterConfig, Happening, Mode, Pose};
+pub use clip::{ClipId, ClipKind, ClipSpec, Playback};
 pub use conversation::{Conversation, Message, Persona, Role, ToolCall};
 pub use geometry::{Point, Rect};
 pub use intent::Intent;

@@ -3,6 +3,7 @@
 //! ledges come in as plain data, frames go out as plain data.
 
 use crate::animator::{Animator, Frame};
+use crate::body::BodyCommand;
 use crate::clip::ClipId;
 use crate::geometry::Point;
 use crate::ledge::{self, Ledge, LedgeKind};
@@ -20,11 +21,13 @@ pub struct CharacterConfig {
     pub roaming: bool,
     /// Idle seconds on the floor before she falls asleep.
     pub sleep_after: f32,
+    /// Whether she lies down and naps (mini, on the taskbar) by herself now and then.
+    pub rests: bool,
 }
 
 impl Default for CharacterConfig {
     fn default() -> Self {
-        Self { size: 240.0, gravity: 2600.0, roam_every: (18.0, 40.0), roaming: true, sleep_after: 300.0 }
+        Self { size: 240.0, gravity: 2600.0, roam_every: (18.0, 40.0), roaming: true, sleep_after: 300.0, rests: true }
     }
 }
 
@@ -35,7 +38,7 @@ impl CharacterConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Mode {
     Hidden,
     Falling,
@@ -46,6 +49,10 @@ pub enum Mode {
     Waking,
     /// Glitching out before reappearing on `Character::target`.
     Teleporting,
+    /// Lying on the taskbar or on top of a window: eyes drift shut after a while, then she gets up.
+    Lying,
+    /// Her mini form, a little screen with her eyes, sitting where she was: napping, or small on purpose.
+    Mini,
 }
 
 /// Things the application may want to react to (sound effects, logs, the chat box following her).
@@ -66,6 +73,37 @@ pub struct Pose {
     pub anchor: Point,
     pub frame: Frame,
     pub visible: bool,
+    /// Eyes shut and sleeping: the renderer lets z's drift up from her head.
+    pub asleep: bool,
+}
+
+/// Which rest poses the skin draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Abilities {
+    pub lie_down: bool,
+    pub mini: bool,
+}
+
+/// Timers of her rest poses (lying down, mini).
+#[derive(Debug, Clone, Default)]
+struct Rest {
+    /// Lying: when she gets up. Mini nap: when she wakes.
+    until: f32,
+    /// Lying: when her eyes drift shut.
+    doze_at: f32,
+    blink_until: f32,
+    next_blink: f32,
+    /// Mini: eyes shut, z's.
+    napping: bool,
+    /// Mini on purpose: she stays small after a nap, until asked back.
+    stay: bool,
+    annoyed_until: f32,
+    glitch_until: f32,
+    next_glitch: f32,
+    /// Mini: when she may doze off again if nobody comes by.
+    next_nap_check: f32,
+    /// Recent single clicks on her mini form (three quick ones annoy her).
+    clicks: Vec<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +122,10 @@ pub struct Character {
     last_activity: f32,
     next_roam: f32,
     rng: Rng,
+    abilities: Abilities,
+    rest: Rest,
+    /// The mouse pointer on screen: her mini eyes follow it.
+    pointer: Option<Point>,
 }
 
 impl Character {
@@ -102,7 +144,22 @@ impl Character {
             last_activity: 0.0,
             next_roam: f32::INFINITY,
             rng: Rng::seeded(seed),
+            abilities: Abilities::default(),
+            rest: Rest::default(),
+            pointer: None,
         }
+    }
+
+    /// What the loaded skin can draw: no lying art, no lying down; no mini art, no mini form.
+    pub fn set_abilities(&mut self, abilities: Abilities, now: f32) {
+        self.abilities = abilities;
+        if self.mode == Mode::Lying && !abilities.lie_down || self.mode == Mode::Mini && !abilities.mini {
+            self.get_up(now);
+        }
+    }
+
+    pub fn set_pointer(&mut self, p: Point) {
+        self.pointer = Some(p);
     }
 
     pub fn mode(&self) -> Mode {
@@ -136,7 +193,12 @@ impl Character {
 
     /// Top of her head, where the chat bubble attaches.
     pub fn head(&self) -> Point {
-        let h = if self.mode == Mode::Perching { 0.75 } else { 1.05 };
+        let h = match self.mode {
+            Mode::Perching => 0.75,
+            Mode::Lying => 0.5,
+            Mode::Mini => 0.36,
+            _ => 1.05,
+        };
         Point::new(self.pos.x, self.pos.y - self.cfg.size * h)
     }
 
@@ -162,6 +224,7 @@ impl Character {
             self.pos.y += self.cfg.size * 0.38;
         }
         self.seat = None;
+        self.rest.napping = false;
         self.touch(now);
         self.enter(Mode::Held, now);
     }
@@ -187,8 +250,151 @@ impl Character {
             Mode::Sleeping => self.enter(Mode::Waking, now),
             Mode::Standing => self.animator.play(ClipId::Glitch, now),
             Mode::Perching => self.animator.play(ClipId::PerchGlitch, now),
+            Mode::Lying | Mode::Mini => self.get_up(now),
             _ => {}
         }
+    }
+
+    /// A single click on her. Three quick ones on her mini form and she gets fed up for a moment.
+    /// Returns true when that just happened.
+    pub fn clicked(&mut self, now: f32) -> bool {
+        self.touch(now);
+        if self.mode != Mode::Mini || self.rest.napping {
+            return false;
+        }
+        self.rest.clicks.retain(|t| now - t < 2.5);
+        self.rest.clicks.push(now);
+        if self.rest.clicks.len() >= 3 {
+            self.rest.clicks.clear();
+            self.rest.annoyed_until = now + 3.0;
+            return true;
+        }
+        false
+    }
+
+    /// Asked in words (typed or said). Returns false when she can't do it right now.
+    pub fn command(&mut self, cmd: BodyCommand, now: f32) -> bool {
+        // activity, but not `touch`: a nap must not wake her straight back up
+        self.last_activity = now;
+        match cmd {
+            BodyCommand::Nap => self.nap(now),
+            BodyCommand::Mini => self.go_mini(now),
+            BodyCommand::FullSize => {
+                if self.mode == Mode::Mini {
+                    self.get_up(now);
+                    true
+                } else {
+                    false
+                }
+            }
+            BodyCommand::LieDown => self.lie_down(now, (40.0, 80.0)),
+            BodyCommand::WakeUp => match self.mode {
+                Mode::Sleeping => {
+                    self.enter(Mode::Waking, now);
+                    true
+                }
+                Mode::Lying => {
+                    self.get_up(now);
+                    true
+                }
+                Mode::Mini if self.rest.napping => {
+                    self.wake_from_nap(now);
+                    true
+                }
+                _ => false,
+            },
+        }
+    }
+
+    /// Shrinks into her mini form and dozes off; she wakes up full size after a minute or two.
+    /// Already mini, she dozes off right there and stays mini. Without mini art: a nap standing up.
+    pub fn nap(&mut self, now: f32) -> bool {
+        if !self.abilities.mini {
+            if self.mode == Mode::Standing {
+                self.enter(Mode::Sleeping, now);
+                return true;
+            }
+            return self.lie_down(now, (60.0, 150.0));
+        }
+        if !matches!(self.mode, Mode::Standing | Mode::Perching | Mode::Lying | Mode::Sleeping | Mode::Mini) {
+            return false;
+        }
+        if self.mode != Mode::Mini {
+            self.rest.stay = false;
+            self.become_mini(now);
+        }
+        self.rest.napping = true;
+        self.rest.until = now + self.rng.range(50.0, 110.0);
+        true
+    }
+
+    /// Small and awake on purpose: she stays mini until asked back (or double-clicked).
+    pub fn go_mini(&mut self, now: f32) -> bool {
+        if !self.abilities.mini {
+            return false;
+        }
+        if !matches!(self.mode, Mode::Standing | Mode::Perching | Mode::Lying | Mode::Sleeping | Mode::Mini) {
+            return false;
+        }
+        if self.mode != Mode::Mini {
+            self.become_mini(now);
+        }
+        self.rest.stay = true;
+        self.rest.napping = false;
+        self.rest.next_nap_check = now + 240.0;
+        true
+    }
+
+    /// Lies down where she is, on the taskbar or on top of a window, for `seconds` (a range).
+    pub fn lie_down(&mut self, now: f32, seconds: (f32, f32)) -> bool {
+        if !self.abilities.lie_down || self.seat.is_none() {
+            return false;
+        }
+        if !matches!(self.mode, Mode::Standing | Mode::Perching | Mode::Sleeping | Mode::Lying) {
+            return false;
+        }
+        self.enter(Mode::Lying, now);
+        self.rest.until = now + self.rng.range(seconds.0, seconds.1);
+        self.rest.doze_at = now + self.rng.range(10.0, 30.0);
+        self.rest.blink_until = 0.0;
+        self.rest.next_blink = now + self.rng.range(2.5, 6.0);
+        true
+    }
+
+    fn become_mini(&mut self, now: f32) {
+        self.enter(Mode::Mini, now);
+        self.rest.glitch_until = now + 0.25;
+        self.rest.next_glitch = now + self.rng.range(6.0, 20.0);
+        self.rest.next_blink = now + self.rng.range(2.0, 5.0);
+        self.rest.annoyed_until = 0.0;
+        self.rest.clicks.clear();
+    }
+
+    fn wake_from_nap(&mut self, now: f32) {
+        self.rest.napping = false;
+        if self.rest.stay {
+            self.rest.glitch_until = now + 0.15;
+            self.rest.next_nap_check = now + 240.0;
+        } else {
+            self.get_up(now);
+        }
+    }
+
+    /// Back on her feet (or her seat) from lying down or her mini form, with a little glitch.
+    fn get_up(&mut self, now: f32) {
+        self.rest.napping = false;
+        let Some(seat) = self.seat else {
+            self.enter(Mode::Falling, now);
+            return;
+        };
+        if seat.is_seat() {
+            self.enter(Mode::Perching, now);
+            self.animator.play(ClipId::PerchGlitch, now);
+        } else {
+            self.enter(Mode::Standing, now);
+            self.animator.play(ClipId::Glitch, now);
+        }
+        self.schedule_roam(now);
     }
 
     pub fn set_talking(&mut self, talking: bool, now: f32) {
@@ -237,6 +443,18 @@ impl Character {
                 self.follow_seat(now, ledges, &mut happenings);
                 self.maybe_doze_or_roam(now, ledges, &mut happenings);
             }
+            Mode::Lying => {
+                self.follow_seat(now, ledges, &mut happenings);
+                if self.mode == Mode::Lying {
+                    self.lying_step(now);
+                }
+            }
+            Mode::Mini => {
+                self.follow_seat(now, ledges, &mut happenings);
+                if self.mode == Mode::Mini {
+                    self.mini_step(now, &mut happenings);
+                }
+            }
             Mode::Teleporting => {
                 if self.animator.finished() {
                     if let Some((ledge, x)) = self.target.take() {
@@ -256,9 +474,120 @@ impl Character {
         }
         self.settle_clip(now);
 
-        let frame = self.animator.frame(now, self.talking, !self.chat_open, &mut self.rng);
-        let pose = Pose { mode: self.mode, anchor: self.pos, frame, visible: self.mode != Mode::Hidden };
+        let mut frame = self.animator.frame(now, self.talking, !self.chat_open, &mut self.rng);
+        let look = match self.mode {
+            Mode::Lying => Some(self.lying_look(now)),
+            Mode::Mini => Some(self.mini_look(now)),
+            _ => None,
+        };
+        if let Some(clip) = look {
+            frame = Frame { clip, index: 0, mouth: None };
+        }
+        let asleep = match self.mode {
+            Mode::Sleeping => true,
+            Mode::Lying => !self.talking && now > self.rest.doze_at,
+            Mode::Mini => !self.talking && self.rest.napping,
+            _ => false,
+        };
+        let pose = Pose { mode: self.mode, anchor: self.pos, frame, visible: self.mode != Mode::Hidden, asleep };
         (pose, happenings)
+    }
+
+    fn blink_now_and_then(&mut self, now: f32, length: f32) {
+        if now > self.rest.next_blink {
+            self.rest.blink_until = now + length;
+            // now and then two quick blinks
+            let gap = if self.rng.unit() < 0.15 { 0.3 } else { self.rng.range(2.5, 6.0) };
+            self.rest.next_blink = now + gap;
+        }
+    }
+
+    fn lying_step(&mut self, now: f32) {
+        if self.talking || self.chat_open {
+            // talking to her keeps her eyes open a while longer
+            self.rest.doze_at = self.rest.doze_at.max(now + 10.0);
+        } else if now > self.rest.until {
+            self.get_up(now);
+            return;
+        }
+        self.blink_now_and_then(now, 0.15);
+    }
+
+    fn lying_look(&self, now: f32) -> ClipId {
+        if self.talking {
+            return match (now * 8.0) as u32 % 3 {
+                0 => ClipId::LayTalk,
+                1 => ClipId::LayTalk2,
+                _ => ClipId::LayAwake,
+            };
+        }
+        if now > self.rest.doze_at || now < self.rest.blink_until { ClipId::Lay } else { ClipId::LayAwake }
+    }
+
+    fn mini_step(&mut self, now: f32, out: &mut Vec<Happening>) {
+        let busy = self.talking || self.chat_open;
+        self.blink_now_and_then(now, 0.14);
+        if now > self.rest.next_glitch {
+            self.rest.glitch_until = now + 0.12;
+            self.rest.next_glitch = now + self.rng.range(6.0, 20.0);
+        }
+        if self.rest.napping {
+            if !busy && now > self.rest.until {
+                let stay = self.rest.stay;
+                self.wake_from_nap(now);
+                if !stay {
+                    out.push(Happening::Woke);
+                }
+            }
+            return;
+        }
+        // small on purpose and nobody around for a long while: she dozes off now and then
+        if self.rest.stay && self.cfg.rests && !busy && now > self.rest.next_nap_check {
+            self.rest.next_nap_check = now + 30.0;
+            if now - self.last_activity > 240.0 && self.rng.unit() < 0.25 {
+                self.rest.napping = true;
+                self.rest.until = now + self.rng.range(50.0, 110.0);
+                out.push(Happening::FellAsleep);
+            }
+        }
+    }
+
+    fn mini_look(&self, now: f32) -> ClipId {
+        if now < self.rest.glitch_until {
+            return ClipId::MiniGlitch;
+        }
+        // mouth flaps open, open (second frame), shut
+        let step = (now * 7.0) as u32 % 3;
+        let open = self.talking && step != 2;
+        let two = step == 1;
+        if self.rest.napping {
+            // eyes stay shut; she mumbles back in her sleep
+            return if open { ClipId::MiniTalk } else { ClipId::MiniBlink };
+        }
+        let blinking = now < self.rest.blink_until;
+        if now < self.rest.annoyed_until {
+            return if open {
+                ClipId::MiniAnnoyedTalk
+            } else if blinking {
+                ClipId::MiniBlink
+            } else {
+                ClipId::MiniAnnoyed
+            };
+        }
+        if open {
+            return if two { ClipId::MiniTalk2 } else { ClipId::MiniTalk };
+        }
+        if blinking {
+            return ClipId::MiniBlink;
+        }
+        // her eyes follow the pointer when it is off to one side
+        if let Some(p) = self.pointer {
+            let dx = p.x - self.pos.x;
+            if dx.abs() >= self.cfg.size * 0.4 * 1.2 {
+                return if dx < 0.0 { ClipId::MiniLookLeft } else { ClipId::MiniLookRight };
+            }
+        }
+        ClipId::MiniIdle
     }
 
     fn fall(&mut self, now: f32, dt: f32, ledges: &[Ledge], out: &mut Vec<Happening>) {
@@ -323,6 +652,21 @@ impl Character {
             return;
         }
         self.schedule_roam(now);
+        if self.cfg.rests {
+            // like the original: now and then a nap in her mini form, often a lie-down where she is
+            // (more often when nobody has talked to her in a while)
+            let bored = now - self.last_activity > 120.0;
+            let r = self.rng.unit();
+            if r < 0.12 && self.abilities.mini {
+                self.nap(now);
+                out.push(Happening::FellAsleep);
+                return;
+            }
+            let lie_chance = if bored { 0.62 } else { 0.37 };
+            if r < lie_chance && self.lie_down(now, if bored { (60.0, 150.0) } else { (25.0, 60.0) }) {
+                return;
+            }
+        }
         let here = self.seat.map(|s| s.id);
         let options: Vec<Ledge> =
             ledges.iter().copied().filter(|l| l.fits(self.cfg.min_seat_width()) && Some(l.id) != here).collect();
@@ -359,6 +703,8 @@ impl Character {
             Mode::Perching => ClipId::Perch,
             Mode::Sleeping => ClipId::Sleep,
             Mode::Waking => ClipId::Wake,
+            Mode::Lying => ClipId::LayAwake,
+            Mode::Mini => ClipId::MiniIdle,
             Mode::Teleporting => {
                 if self.seat.is_some_and(|s| s.is_seat()) {
                     ClipId::PerchGlitch
@@ -502,5 +848,141 @@ mod tests {
         run(&mut c, 0.0, 5.0, &[floor()]);
         assert_eq!(c.mode(), Mode::Standing);
         assert!(c.position().x <= 1920.0);
+    }
+
+    fn rested(seed: u64) -> (Character, Vec<Ledge>, f32) {
+        let mut c = Character::new(calm(), seed);
+        c.set_abilities(Abilities { lie_down: true, mini: true }, 0.0);
+        c.appear(Point::new(100.0, 0.0), 0.0);
+        let ledges = vec![floor()];
+        let (t, _) = run(&mut c, 0.0, 3.0, &ledges);
+        assert_eq!(c.mode(), Mode::Standing);
+        (c, ledges, t)
+    }
+
+    fn pose(c: &mut Character, t: f32, ledges: &[Ledge]) -> Pose {
+        c.tick(t, 1.0 / 60.0, ledges).0
+    }
+
+    #[test]
+    fn lies_down_dozes_off_talks_and_gets_up() {
+        let (mut c, ledges, t) = rested(3);
+        assert!(c.command(BodyCommand::LieDown, t));
+        let p = pose(&mut c, t + 0.1, &ledges);
+        assert_eq!((p.mode, p.asleep), (Mode::Lying, false));
+        assert!(matches!(p.frame.clip, ClipId::LayAwake | ClipId::Lay));
+        // eyes drift shut after 10-30 s
+        let (t, _) = run(&mut c, t, 31.0, &ledges);
+        let p = pose(&mut c, t, &ledges);
+        assert!(p.asleep && p.frame.clip == ClipId::Lay, "{p:?}");
+        // talking to her: mouth moves, eyes open
+        c.set_talking(true, t);
+        let looks: Vec<ClipId> = (0..6).map(|i| pose(&mut c, t + i as f32 * 0.13, &ledges).frame.clip).collect();
+        assert!(looks.contains(&ClipId::LayTalk) && looks.contains(&ClipId::LayTalk2), "{looks:?}");
+        assert!(!pose(&mut c, t + 1.0, &ledges).asleep);
+        c.set_talking(false, t + 1.0);
+        // she never gets up mid-line, but does once it's over and her time is up
+        run(&mut c, t + 1.0, 90.0, &ledges);
+        assert_eq!(c.mode(), Mode::Standing);
+    }
+
+    #[test]
+    fn a_nap_is_mini_with_eyes_shut_then_she_wakes_full_size() {
+        let (mut c, ledges, t) = rested(4);
+        assert!(c.command(BodyCommand::Nap, t));
+        assert_eq!(c.mode(), Mode::Mini);
+        let p = pose(&mut c, t + 0.5, &ledges);
+        assert!(p.asleep);
+        assert_eq!(p.frame.clip, ClipId::MiniBlink);
+        assert!((p.anchor.y - 1040.0).abs() < f32::EPSILON, "on the taskbar");
+        c.set_talking(true, t + 1.0);
+        assert!(!pose(&mut c, t + 1.0, &ledges).asleep, "mumbling back");
+        c.set_talking(false, t + 2.0);
+        let (_, events) = run(&mut c, t + 2.0, 115.0, &ledges);
+        assert_eq!(c.mode(), Mode::Standing);
+        assert!(events.contains(&Happening::Woke));
+    }
+
+    #[test]
+    fn mini_on_purpose_stays_follows_the_pointer_and_gets_annoyed() {
+        let (mut c, ledges, t) = rested(5);
+        assert!(c.command(BodyCommand::Mini, t));
+        let (t, _) = run(&mut c, t, 1.0, &ledges);
+        c.set_pointer(Point::new(c.position().x + 900.0, 500.0));
+        let looks: Vec<ClipId> = (0..40).map(|i| pose(&mut c, t + i as f32 * 0.05, &ledges).frame.clip).collect();
+        assert!(looks.contains(&ClipId::MiniLookRight), "{looks:?}");
+        let shut = looks.iter().filter(|l| **l == ClipId::MiniBlink).count();
+        assert!(shut < looks.len() / 2, "awake, eyes open most of the time: {looks:?}");
+        assert!(!c.clicked(t + 2.0) && !c.clicked(t + 2.6));
+        assert!(c.clicked(t + 3.2), "third click in 2.5 s");
+        assert_eq!(pose(&mut c, t + 3.3, &ledges).frame.clip, ClipId::MiniAnnoyed);
+        run(&mut c, t + 3.3, 300.0, &ledges);
+        assert_eq!(c.mode(), Mode::Mini, "small until asked back");
+        assert!(c.command(BodyCommand::FullSize, t + 304.0));
+        assert_eq!(c.mode(), Mode::Standing);
+    }
+
+    #[test]
+    fn a_double_click_brings_her_back_from_mini_or_lying() {
+        let (mut c, ledges, t) = rested(6);
+        c.command(BodyCommand::Nap, t);
+        c.poke(t + 1.0);
+        assert_eq!(c.mode(), Mode::Standing);
+        let (t, _) = run(&mut c, t + 1.0, 2.0, &ledges);
+        c.command(BodyCommand::LieDown, t);
+        c.poke(t + 1.0);
+        assert_eq!(c.mode(), Mode::Standing);
+    }
+
+    #[test]
+    fn without_the_art_she_naps_standing_and_never_lies_down() {
+        let mut c = Character::new(calm(), 7);
+        c.appear(Point::new(100.0, 0.0), 0.0);
+        let (t, _) = run(&mut c, 0.0, 3.0, &[floor()]);
+        assert!(!c.command(BodyCommand::LieDown, t));
+        assert!(!c.command(BodyCommand::Mini, t));
+        assert!(c.command(BodyCommand::Nap, t));
+        assert_eq!(c.mode(), Mode::Sleeping);
+        assert!(c.command(BodyCommand::WakeUp, t + 1.0));
+        assert_eq!(c.mode(), Mode::Waking);
+    }
+
+    #[test]
+    fn roaming_with_rests_lies_down_and_naps_now_and_then() {
+        let cfg = CharacterConfig { roam_every: (1.0, 2.0), ..CharacterConfig::default() };
+        let mut c = Character::new(cfg, 11);
+        c.set_abilities(Abilities { lie_down: true, mini: true }, 0.0);
+        c.appear(Point::new(100.0, 0.0), 0.0);
+        let ledges = [floor(), window(7, 500.0)];
+        let mut seen = std::collections::HashSet::new();
+        let mut t = 0.0;
+        while t < 1200.0 {
+            t += 1.0 / 30.0;
+            seen.insert(c.tick(t, 1.0 / 30.0, &ledges).0.mode);
+            c.touch(t); // keep her from falling asleep for good
+        }
+        assert!(seen.contains(&Mode::Lying) && seen.contains(&Mode::Mini), "{seen:?}");
+
+        let quiet = CharacterConfig { rests: false, ..cfg };
+        let mut c = Character::new(quiet, 11);
+        c.set_abilities(Abilities { lie_down: true, mini: true }, 0.0);
+        c.appear(Point::new(100.0, 0.0), 0.0);
+        let mut t = 0.0;
+        while t < 600.0 {
+            t += 1.0 / 30.0;
+            let m = c.tick(t, 1.0 / 30.0, &ledges).0.mode;
+            assert!(!matches!(m, Mode::Lying | Mode::Mini));
+            c.touch(t);
+        }
+    }
+
+    #[test]
+    fn sleeping_shows_zs() {
+        let (mut c, ledges, t) = rested(8);
+        let cfg = CharacterConfig { sleep_after: 5.0, ..*c.config() };
+        c.set_config(cfg);
+        let (t, _) = run(&mut c, t, 10.0, &ledges);
+        assert_eq!(c.mode(), Mode::Sleeping);
+        assert!(pose(&mut c, t, &ledges).asleep);
     }
 }
