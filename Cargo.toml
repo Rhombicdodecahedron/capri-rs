@@ -6,6 +6,7 @@ members = [
     "crates/capri-config",
     "adapters/llm-openai",
     "adapters/llm-claude-code",
+    "adapters/skin-fs",
 ]
 
 [workspace.package]
@@ -21,6 +22,7 @@ capri-application = { path = "crates/capri-application" }
 capri-config = { path = "crates/capri-config" }
 capri-llm-openai = { path = "adapters/llm-openai" }
 capri-llm-claude-code = { path = "adapters/llm-claude-code" }
+capri-skin-fs = { path = "adapters/skin-fs" }
 
 anyhow = "1"
 async-trait = "0.1"

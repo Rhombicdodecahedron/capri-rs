@@ -1,0 +1,19 @@
+[package]
+name = "capri-skin-fs"
+description = "SkinRepository adapter that loads sprite-strip skin folders from disk (same format as capri-ai-desktop)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+capri-application = { workspace = true }
+capri-domain = { workspace = true }
+image = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true
