@@ -58,11 +58,42 @@ A few things work without a round trip to the model:
 - `/new` starts a fresh chat
 - `/settings` opens the settings, `/quit` sends her home
 
+Music commands also skip the model: `pause`, `suivante`, `monte le son`, `mets Daft Punk sur Spotify`,
+`mets en aléatoire`, `like cette chanson`, `c'est quoi cette musique ?` (and their English versions).
+
 Drag her to move her, let go fast to throw her. Double-click to poke her awake.
 
 Facts and the chat log stay on your machine, in a SQLite file in your profile folder.
 
 <br clear="right">
+
+## Her powers
+
+When the brain supports tool calling (llama.cpp with `--jinja`, Ollama, LM Studio, OpenAI, OpenRouter),
+she acts on your PC instead of describing what you could do:
+
+- **Spotify, by its buttons.** No Web API and no account keys: she finds Play, Next, Shuffle, Like and
+  the search results in Spotify's own window and presses them, like Playwright on a web page.
+  "Mets Get Lucky" opens the search and clicks the matching result. "What's playing" reads the window
+  title. When a button can't be found she uses Spotify's keyboard shortcut instead, and when Spotify
+  isn't open, play, pause and next go to any player through the media keys.
+- **Any other app, the same way.** `ui_windows` lists what is open, `ui_snapshot` reads a window's
+  controls (each with a ref, like Playwright's accessibility snapshot), then `ui_click`, `ui_fill` and
+  `ui_press` act on them. Buttons are pressed through Windows accessibility, so most of the time the
+  mouse doesn't move and the window doesn't even need to be in front.
+- **The rest of the original's toolkit:** open an app by name (`ouvre la calculatrice`, `lance Steam`),
+  open a website, search Google, YouTube, Wikipedia or Maps, tell the time, lock the PC, remember a
+  fact about you.
+
+Every action goes through one approval check. With **Ask first** she asks in the chat box
+("Je peux ? Spotify: play "Get Lucky" (oui / non)") and your next line, typed or said, is the answer;
+anything else counts as no. Music commands you type yourself run directly. Whatever the setting,
+she always asks before a button that deletes, sends, pays or signs out, before Enter in anything that
+isn't a search box, and before shortcuts like Alt+F4. Password managers, banking, private browsing,
+sign-in windows and anything on your own never-touch list are off limits: she doesn't read them or
+touch them.
+
+Driving apps works on Windows. On Linux and macOS she has the other powers and the media keys.
 
 ## Settings
 
@@ -103,20 +134,24 @@ apps/capri                     reads capri.toml, builds the adapters, starts the
 │   ├── llm-openai             llama.cpp, Ollama, LM Studio, OpenAI, OpenRouter, anything /v1
 │   ├── llm-claude-code        the Claude Code CLI
 │   ├── desktop-windows        visible window edges via Win32
+│   ├── ui-windows             her hands on other apps: Windows UI Automation
+│   ├── system-os              open apps and sites, web search, time, lock
+│   ├── media-os               media keys and system volume
 │   ├── memory-sqlite          facts and chat log
 │   └── skin-fs                sprite sheets from assets/skins
 │
 ├── crates/capri-config        the capri.toml schema, comment-preserving save
-├── crates/capri-application   use cases (chat, desk, tools) and the ports adapters implement
-└── crates/capri-domain        pure logic: falling, perching, blinking, roaming, approvals
+├── crates/capri-application   use cases (chat, desk, tools, Spotify, app driving) and their ports
+└── crates/capri-domain        pure logic: falling, perching, roaming, approvals, locators, risky labels
 ```
 
 Dependencies point inward only. The domain has no I/O at all: time comes in as a number, the desktop
 comes in as a list of ledges, randomness comes from a seeded generator. That is why falling off a
 closed window or dozing off after five idle minutes are plain unit tests.
 
-Anything she does on your PC will go through one approval check in the application layer. Text from
-the model can ask for an action, never approve one.
+Anything she does on your PC goes through one approval check in the application layer. Text from
+the model can ask for an action, never approve one. Which button is risky and which window is private
+is decided in the domain, so no adapter can skip it.
 
 ## Skins
 
@@ -129,9 +164,12 @@ so its skins drop in unchanged. See [assets/skins/README.md](assets/skins/README
 - [x] On the desk: perching, falling, roaming, sleeping, chat, memory
 - [x] Brains: llama.cpp, Ollama, LM Studio, OpenAI, OpenRouter, Claude Code
 - [x] Settings panel with live reload, French and English
-- [ ] Tools (apps, music, files, web) behind the approval check
+- [x] Tools (music, apps, web, driving other apps) behind the approval check
+- [x] Voice in and out
+- [ ] Reminders, timers and to-do lists
+- [ ] Files (notes, cleaning Downloads) and reading web pages
 - [ ] MCP client
-- [ ] Voice in and out
+- [ ] Driving apps on Linux (AT-SPI) and macOS
 - [ ] Mini form and lying-down poses (the art is already in the skin)
 - [ ] Window edges on macOS and Linux
 
