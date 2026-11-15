@@ -7,6 +7,10 @@ use capri_application::ports::{LanguageModel, LlmError, TokenStream};
 use capri_domain::{Message, Role};
 use futures::StreamExt;
 use serde::Deserialize;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+
+use futures::stream::BoxStream;
 use tokio::sync::OnceCell;
 
 mod sse;
@@ -52,11 +56,17 @@ impl OpenAiConfig {
     }
 }
 
-#[derive(Debug)]
+/// Extra tokens allowed for a model's hidden reasoning, on top of the reply budget.
+pub const THINKING_BUDGET: u32 = 3072;
+
+#[derive(Debug, Clone)]
 pub struct OpenAiCompatible {
     cfg: OpenAiConfig,
     http: reqwest::Client,
-    resolved: OnceCell<String>,
+    resolved: Arc<OnceCell<String>>,
+    /// Set once the model has been seen thinking although thinking was turned off (some servers
+    /// ignore the switch): from then on every request leaves room for it.
+    thinks: Arc<AtomicBool>,
 }
 
 #[derive(Deserialize)]
@@ -101,8 +111,14 @@ struct Delta {
 struct Tally {
     said: bool,
     reasoning_chars: usize,
+    /// Text that arrived as content but sat inside `<think>` tags.
+    hidden_chars: usize,
+    /// SSE `data:` payloads seen.
+    events: usize,
     finish: Option<String>,
     error: Option<String>,
+    /// The start of the raw body, for a server that ignored `stream: true` and for diagnostics.
+    head: String,
 }
 
 impl Tally {
@@ -112,15 +128,31 @@ impl Tally {
             return LlmError::Backend(e.clone());
         }
         let budget = max_tokens.map_or_else(String::new, |m| format!(" ({m} tokens)"));
-        match (self.reasoning_chars, self.finish.as_deref()) {
+        match (self.reasoning_chars + self.hidden_chars, self.finish.as_deref()) {
             (r, Some("length")) if r > 0 => LlmError::Backend(format!(
                 "the model spent its whole budget{budget} thinking and never answered: raise the max reply length, \
                  or use a model or server option that turns thinking off"
             )),
             (r, _) if r > 0 => LlmError::Backend("the model only thought and gave no answer".into()),
             (_, Some("length")) => LlmError::Backend(format!("the model hit the length limit{budget} before any text")),
-            _ => LlmError::Backend("empty reply".into()),
+            _ if self.events == 0 => LlmError::Backend(format!(
+                "the server did not stream a reply; it answered: {}",
+                self.head.chars().take(200).collect::<String>()
+            )),
+            _ => LlmError::Backend(format!("empty reply (finish: {})", self.finish.as_deref().unwrap_or("none"))),
         }
+    }
+
+    /// A server that ignored `stream: true` sends one plain JSON completion: take its text.
+    fn whole_reply(&self) -> Option<String> {
+        if self.events > 0 {
+            return None;
+        }
+        let v: serde_json::Value = serde_json::from_str(self.head.trim()).ok()?;
+        let text = v["choices"][0]["message"]["content"].as_str()?;
+        let mut think = ThinkFilter::default();
+        let visible = think.feed(text);
+        (!visible.trim().is_empty()).then(|| visible.trim().to_string())
     }
 }
 
@@ -129,6 +161,7 @@ fn absorb(data: &str, tally: &mut Tally, think: &mut ThinkFilter) -> Option<Stri
     if data == "[DONE]" {
         return None;
     }
+    tally.events += 1;
     let parsed: Chunk = serde_json::from_str(data).ok()?;
     if let Some(e) = parsed.error {
         tally.error = Some(e.get("message").and_then(|m| m.as_str()).map_or_else(|| e.to_string(), str::to_string));
@@ -146,6 +179,7 @@ fn absorb(data: &str, tally: &mut Tally, think: &mut ThinkFilter) -> Option<Stri
         }
     }
     let visible = think.feed(&text);
+    tally.hidden_chars += text.len().saturating_sub(visible.len());
     if visible.trim().is_empty() {
         return None;
     }
@@ -157,7 +191,7 @@ impl OpenAiCompatible {
     pub fn new(cfg: OpenAiConfig) -> Self {
         let http =
             reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(5)).build().unwrap_or_default();
-        Self { cfg, http, resolved: OnceCell::new() }
+        Self { cfg, http, resolved: Arc::new(OnceCell::new()), thinks: Arc::new(AtomicBool::new(false)) }
     }
 
     pub fn config(&self) -> &OpenAiConfig {
@@ -258,7 +292,67 @@ impl LanguageModel for OpenAiCompatible {
 
     async fn stream(&self, messages: &[Message]) -> Result<TokenStream, LlmError> {
         let model = self.model().await?;
-        let body = build_body(&self.cfg, &model, messages);
+        let budget = self.budget();
+        let (first, tally) = self.open(&model, messages, budget).await?;
+        let this = self.clone();
+        let messages = messages.to_vec();
+        // after the stream: nothing to add if she said something; otherwise either retry with room to
+        // think (a model that thinks although told not to) or explain why the reply is empty
+        let tail = futures::stream::once(async move {
+            let (said, thought_out, whole, error) = {
+                let t = tally.lock().unwrap_or_else(PoisonError::into_inner);
+                let thought_out = t.reasoning_chars + t.hidden_chars > 0 && t.finish.as_deref() == Some("length");
+                if !t.said {
+                    tracing::warn!(
+                        events = t.events,
+                        reasoning_chars = t.reasoning_chars,
+                        hidden_chars = t.hidden_chars,
+                        finish = ?t.finish,
+                        head = %t.head.chars().take(300).collect::<String>(),
+                        "no visible text in the reply"
+                    );
+                }
+                (t.said, thought_out, t.whole_reply(), t.empty_reply(budget))
+            };
+            if said {
+                return futures::stream::empty().boxed();
+            }
+            if let Some(text) = whole {
+                return futures::stream::once(async move { Ok(text) }).boxed();
+            }
+            if thought_out && !this.cfg.thinking && !this.thinks.swap(true, Ordering::Relaxed) {
+                let bigger = this.budget();
+                tracing::info!(model = %model, budget = ?bigger, "the model thinks even with thinking off, retrying with room for it");
+                return match this.open(&model, &messages, bigger).await {
+                    Ok((retry, t2)) => retry.chain(explain_if_empty(t2, bigger)).boxed(),
+                    Err(e) => futures::stream::once(async move { Err(e) }).boxed(),
+                };
+            }
+            futures::stream::once(async move { Err(error) }).boxed()
+        })
+        .flatten();
+        Ok(Box::pin(first.chain(tail)))
+    }
+}
+
+type Shared = Arc<Mutex<Tally>>;
+
+impl OpenAiCompatible {
+    /// The reply budget, plus room for reasoning when the model thinks.
+    fn budget(&self) -> Option<u32> {
+        let thinks = self.cfg.thinking || self.thinks.load(Ordering::Relaxed);
+        self.cfg.max_tokens.map(|m| if thinks { m.saturating_add(THINKING_BUDGET) } else { m })
+    }
+
+    /// Sends one request and returns its visible text as a stream, plus the tally of what it carried.
+    async fn open(
+        &self,
+        model: &str,
+        messages: &[Message],
+        max_tokens: Option<u32>,
+    ) -> Result<(BoxStream<'static, Result<String, LlmError>>, Shared), LlmError> {
+        let cfg = OpenAiConfig { max_tokens, ..self.cfg.clone() };
+        let body = build_body(&cfg, model, messages);
         let resp = self
             .auth(self.http.post(self.url("chat/completions")).json(&body))
             .send()
@@ -266,35 +360,44 @@ impl LanguageModel for OpenAiCompatible {
             .map_err(|e| LlmError::Unreachable(e.to_string()))?;
         let resp = check(resp).await?;
 
-        let bytes = resp.bytes_stream();
         let mut lines = sse::Lines::default();
         let mut think = ThinkFilter::default();
-        let tally = std::sync::Arc::new(std::sync::Mutex::new(Tally::default()));
+        let tally: Shared = Arc::default();
         let seen = tally.clone();
-        let max_tokens = self.cfg.max_tokens;
-        let body = bytes
+        let text = resp
+            .bytes_stream()
             .map(move |chunk| -> Vec<Result<String, LlmError>> {
                 let chunk = match chunk {
                     Ok(c) => c,
                     Err(e) => return vec![Err(LlmError::Interrupted(e.to_string()))],
                 };
-                let mut t = seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut t = seen.lock().unwrap_or_else(PoisonError::into_inner);
+                if t.head.len() < 4096 {
+                    t.head.push_str(&String::from_utf8_lossy(&chunk));
+                }
                 lines.push(&chunk).into_iter().filter_map(|data| absorb(&data, &mut t, &mut think).map(Ok)).collect()
             })
-            .flat_map(futures::stream::iter);
-        // when the stream ends without a visible word, say why instead of returning nothing
-        let end = futures::stream::once(async move {
-            let t = tally.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if t.said {
-                None
-            } else {
-                tracing::warn!(reasoning_chars = t.reasoning_chars, finish = ?t.finish, error = ?t.error, "empty reply");
-                Some(Err(t.empty_reply(max_tokens)))
-            }
-        })
-        .filter_map(futures::future::ready);
-        Ok(Box::pin(body.chain(end)))
+            .flat_map(futures::stream::iter)
+            .boxed();
+        Ok((text, tally))
     }
+}
+
+/// Ends a stream with an explanation when it carried no visible word.
+fn explain_if_empty(tally: Shared, max_tokens: Option<u32>) -> BoxStream<'static, Result<String, LlmError>> {
+    futures::stream::once(async move {
+        let t = tally.lock().unwrap_or_else(PoisonError::into_inner);
+        if t.said {
+            None
+        } else if let Some(text) = t.whole_reply() {
+            Some(Ok(text))
+        } else {
+            tracing::warn!(events = t.events, reasoning_chars = t.reasoning_chars, hidden_chars = t.hidden_chars, finish = ?t.finish, "empty reply after retry");
+            Some(Err(t.empty_reply(max_tokens)))
+        }
+    })
+    .filter_map(futures::future::ready)
+    .boxed()
 }
 
 #[cfg(test)]
@@ -343,6 +446,26 @@ mod tests {
         ]);
         assert_eq!(text, "");
         assert!(t.empty_reply(Some(400)).to_string().contains("whole budget (400 tokens) thinking"));
+    }
+
+    #[test]
+    fn takes_a_whole_reply_from_a_server_that_does_not_stream() {
+        let t = Tally {
+            head: r#"{"choices":[{"message":{"role":"assistant","content":"<think>x</think>Salut"}}]}"#.into(),
+            ..Tally::default()
+        };
+        assert_eq!(t.whole_reply().as_deref(), Some("Salut"));
+    }
+
+    #[test]
+    fn thinking_inside_content_counts_as_thinking() {
+        let (text, t) = run(&[
+            r#"{"choices":[{"delta":{"content":"<think>let me think about it"}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#,
+        ]);
+        assert_eq!(text, "");
+        assert!(t.hidden_chars > 0);
+        assert!(t.empty_reply(Some(400)).to_string().contains("thinking"));
     }
 
     #[test]
