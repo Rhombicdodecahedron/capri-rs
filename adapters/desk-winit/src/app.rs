@@ -126,6 +126,9 @@ struct Press {
     grab_offset: Point,
     dragging: bool,
     on_bubble: bool,
+    /// The OS has reported the button down during this press. Until then its "up" answer is not
+    /// trusted: some setups never report the button through the global state.
+    seen_down: bool,
 }
 
 impl Live {
@@ -157,6 +160,7 @@ impl Live {
         let moved = (screen.x - press.at_screen.x).hypot(screen.y - press.at_screen.y);
         if !press.dragging && !press.on_bubble && moved > DRAG_THRESHOLD {
             press.dragging = true;
+            tracing::debug!(moved, "drag starts");
             self.desk.character_mut().grab(now);
             // measured after grab: picking her up off a window shifts her to hang from the hand
             let her = self.desk.character().position();
@@ -174,11 +178,17 @@ impl Live {
         let now = self.now();
         let dt = now - self.last_tick;
         self.last_tick = now;
-        if self.press.is_some() {
+        if let Some(press) = self.press.as_mut() {
             // a release that happened outside her window (fast throw) must not leave her stuck in the air
-            if present::os_left_button_down() == Some(false) {
-                self.release(now);
-            } else {
+            match present::os_left_button_down() {
+                Some(true) => press.seen_down = true,
+                Some(false) if press.seen_down && press.dragging => {
+                    tracing::debug!("button released outside her window");
+                    self.release(now);
+                }
+                _ => {}
+            }
+            if self.press.is_some() {
                 self.pointer_moved(now);
             }
         }
@@ -221,8 +231,14 @@ impl Live {
         let (x, y) = self.cursor_local();
         let on_bubble = self.painter.bubble_rect.is_some_and(|r| r.contains(x, y));
         self.trail.clear();
-        self.press =
-            Some(Press { at_screen: self.cursor_screen(), grab_offset: Point::default(), dragging: false, on_bubble });
+        self.press = Some(Press {
+            at_screen: self.cursor_screen(),
+            grab_offset: Point::default(),
+            dragging: false,
+            on_bubble,
+            seen_down: false,
+        });
+        tracing::debug!(x, y, on_bubble, "press");
     }
 
     /// Button up: a throw if she was being dragged, otherwise a click (double click pokes her).
