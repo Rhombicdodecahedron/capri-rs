@@ -1,0 +1,21 @@
+[package]
+name = "capri-memory-sqlite"
+description = "MemoryStore adapter on a local SQLite file: facts about the user and the chat log, kept on the user's PC."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+capri-application = { workspace = true }
+capri-domain = { workspace = true }
+async-trait = { workspace = true }
+rusqlite = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true

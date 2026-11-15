@@ -8,6 +8,7 @@ members = [
     "adapters/llm-claude-code",
     "adapters/skin-fs",
     "adapters/desktop-windows",
+    "adapters/memory-sqlite",
 ]
 
 [workspace.package]
@@ -25,6 +26,7 @@ capri-llm-openai = { path = "adapters/llm-openai" }
 capri-llm-claude-code = { path = "adapters/llm-claude-code" }
 capri-skin-fs = { path = "adapters/skin-fs" }
 capri-desktop-windows = { path = "adapters/desktop-windows" }
+capri-memory-sqlite = { path = "adapters/memory-sqlite" }
 
 anyhow = "1"
 async-trait = "0.1"
