@@ -14,13 +14,20 @@ pub enum MediaCommand {
     VolumeDown,
     Mute,
     OpenSpotify,
-    /// Look something up in Spotify.
+    /// Find it on Spotify and start it.
     Search(String),
+    Shuffle,
+    Repeat,
+    /// Add the current song to Liked Songs.
+    Like,
+    /// What song is this?
+    NowPlaying,
 }
 
 impl MediaCommand {
-    /// Her short answer once it is done.
-    pub fn reply(&self, lang: crate::Language) -> String {
+    /// Her short answer once it is done. `result` is what the tool reported (the song found or
+    /// playing), when it said something useful.
+    pub fn reply(&self, lang: crate::Language, result: &str) -> String {
         let t = |en: &str, fr: &str| lang.pick(en, fr).to_string();
         match self {
             MediaCommand::PlayPause => t("Done.", "C'est fait."),
@@ -32,35 +39,19 @@ impl MediaCommand {
             MediaCommand::VolumeDown => t("Quieter.", "Moins fort."),
             MediaCommand::Mute => t("Sound off.", "Son coupé."),
             MediaCommand::OpenSpotify => t("Opening Spotify.", "J'ouvre Spotify."),
-            MediaCommand::Search(q) => {
-                format!("{} {q}", lang.pick("Looking up on Spotify:", "Je cherche sur Spotify :"))
-            }
+            MediaCommand::Search(q) => match result.strip_prefix("playing ") {
+                Some(song) => format!("{} {song}.", lang.pick("Playing", "Je lance")),
+                None => format!("{} {q}", lang.pick("Looking up on Spotify:", "Je cherche sur Spotify :")),
+            },
+            MediaCommand::Shuffle => t("Shuffle switched.", "Aléatoire basculé."),
+            MediaCommand::Repeat => t("Repeat switched.", "Répétition basculée."),
+            MediaCommand::Like => t("Added to your Liked Songs.", "Ajoutée à tes titres likés."),
+            MediaCommand::NowPlaying => match result.strip_prefix("playing ") {
+                Some(song) => format!("{} {song}.", lang.pick("That's", "C'est")),
+                None => t("Nothing is playing right now.", "Rien ne joue en ce moment."),
+            },
         }
     }
-}
-
-/// Words that only make the request polite, dropped before matching.
-const FILLER: &[&str] =
-    &["capri", "stp", "svp", "please", "pls", "steuplait", "merci", "thanks", "thx", "hey", "hé", "eh", "ok", "okay"];
-
-/// Lowercase words without punctuation or filler.
-fn words(line: &str) -> Vec<String> {
-    let lower = line.to_lowercase().replace(['’', '\''], "' ");
-    let mut out: Vec<String> = lower
-        .split(|c: char| c.is_whitespace() || matches!(c, ',' | '.' | '!' | '?' | ';' | ':'))
-        .filter(|w| !w.is_empty())
-        .map(str::to_string)
-        .collect();
-    // "s'il te plaît" / "s'il vous plaît"
-    let joined = out.join(" ");
-    for phrase in ["s' il te plaît", "s' il te plait", "s' il vous plaît", "s' il vous plait"] {
-        if joined.contains(phrase) {
-            let cleaned = joined.replace(phrase, " ");
-            out = cleaned.split_whitespace().map(str::to_string).collect();
-        }
-    }
-    out.retain(|w| !FILLER.contains(&w.as_str()));
-    out
 }
 
 /// Whole-line commands, in French and English.
@@ -170,25 +161,83 @@ const EXACT: &[(MediaCommand, &[&str])] = &[
     ),
     (MediaCommand::Mute, &["mute", "coupe le son", "silence", "unmute", "remets le son"]),
     (
+        MediaCommand::Shuffle,
+        &[
+            "aleatoire",
+            "mode aleatoire",
+            "mets en aleatoire",
+            "lecture aleatoire",
+            "active l' aleatoire",
+            "shuffle",
+            "shuffle on",
+            "turn on shuffle",
+        ],
+    ),
+    (
+        MediaCommand::Repeat,
+        &["repete", "en boucle", "mets en boucle", "repetition", "repeat", "repeat this", "loop", "on repeat"],
+    ),
+    (
+        MediaCommand::Like,
+        &[
+            "like",
+            "like la",
+            "like le",
+            "like ce son",
+            "like cette chanson",
+            "like cette musique",
+            "like ce titre",
+            "ajoute aux titres likes",
+            "ajoute la aux titres likes",
+            "like this",
+            "like this song",
+            "like it",
+            "add to liked songs",
+            "save this song",
+        ],
+    ),
+    (
+        MediaCommand::NowPlaying,
+        &[
+            "c' est quoi cette musique",
+            "c' est quoi cette chanson",
+            "c' est quoi ce son",
+            "c' est quoi ce titre",
+            "quelle est cette chanson",
+            "quelle est cette musique",
+            "qu' est-ce qui joue",
+            "qu' est ce qui joue",
+            "qu' est-ce que j' ecoute",
+            "c' est qui",
+            "what' s playing",
+            "what is playing",
+            "what song is this",
+            "what' s this song",
+            "who is this",
+        ],
+    ),
+    (
         MediaCommand::OpenSpotify,
-        &["lance spotify", "ouvre spotify", "open spotify", "launch spotify", "start spotify", "démarre spotify"],
+        &["lance spotify", "ouvre spotify", "open spotify", "launch spotify", "start spotify", "demarre spotify"],
     ),
 ];
 
 /// "mets X sur spotify", "play X on spotify"...
 const SEARCH: &[(&[&str], &[&str])] = &[
-    (&["mets", "joue", "lance", "cherche", "trouve"], &[" sur spotify", " dans spotify"]),
+    (&["mets", "joue", "lance", "ecoute", "cherche", "trouve"], &[" sur spotify", " dans spotify"]),
     (&["play", "put on", "search", "find"], &[" on spotify", " in spotify"]),
 ];
 
 /// The music command in `line`, if the whole line is one.
 pub fn parse(line: &str) -> Option<MediaCommand> {
-    let w = words(line);
+    let w = crate::words::request(line);
     if w.is_empty() || w.len() > 9 {
         return None;
     }
     let line = w.join(" ");
-    if let Some((cmd, _)) = EXACT.iter().find(|(_, phrases)| phrases.contains(&line.as_str())) {
+    // phrases go through the same normalisation, so they can be written naturally
+    let same = |p: &&str| crate::words::request(p).join(" ") == line;
+    if let Some((cmd, _)) = EXACT.iter().find(|(_, phrases)| phrases.iter().any(same)) {
         return Some(cmd.clone());
     }
     for (verbs, tails) in SEARCH {
@@ -225,7 +274,19 @@ mod tests {
     }
 
     #[test]
+    fn player_toggles_and_questions() {
+        assert_eq!(parse("mets en aléatoire stp"), Some(MediaCommand::Shuffle));
+        assert_eq!(parse("Like cette chanson"), Some(MediaCommand::Like));
+        assert_eq!(parse("c'est quoi cette musique ?"), Some(MediaCommand::NowPlaying));
+        assert_eq!(parse("What's playing?"), Some(MediaCommand::NowPlaying));
+        assert_eq!(parse("écoute Stromae sur Spotify"), Some(MediaCommand::Search("stromae".into())));
+        assert_eq!(parse("arrête la musique"), Some(MediaCommand::Pause));
+        assert_eq!(parse("chanson précédente"), Some(MediaCommand::Previous));
+    }
+
+    #[test]
     fn conversation_is_not_a_command() {
+        assert_eq!(parse("j'aime pas trop le like, tu trouves ?"), None);
         assert_eq!(parse("j'aime bien cette chanson, elle est de qui ?"), None);
         assert_eq!(parse("est-ce que tu peux mettre un peu de musique chill pendant que je code ce soir"), None);
         assert_eq!(parse("pause café ?"), None);
