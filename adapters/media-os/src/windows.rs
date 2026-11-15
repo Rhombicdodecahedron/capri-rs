@@ -26,7 +26,12 @@ pub fn media_key(cmd: &MediaCommand) -> Result<(), String> {
         MediaCommand::VolumeUp => VK_VOLUME_UP,
         MediaCommand::VolumeDown => VK_VOLUME_DOWN,
         MediaCommand::Mute => VK_VOLUME_MUTE,
-        MediaCommand::OpenSpotify | MediaCommand::Search(_) => return Ok(()),
+        MediaCommand::OpenSpotify
+        | MediaCommand::Search(_)
+        | MediaCommand::Shuffle
+        | MediaCommand::Repeat
+        | MediaCommand::Like
+        | MediaCommand::NowPlaying => return Ok(()),
     };
     // volume keys move by 2%: press them a few times so it is noticeable
     let presses = if matches!(cmd, MediaCommand::VolumeUp | MediaCommand::VolumeDown) { 4 } else { 1 };

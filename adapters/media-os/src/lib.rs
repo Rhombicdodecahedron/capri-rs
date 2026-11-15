@@ -18,23 +18,16 @@ pub struct MediaKeys;
 
 /// A `spotify:` link that opens the desktop app on a search.
 pub fn spotify_search_uri(query: &str) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::from("spotify:search:");
-    for b in query.trim().bytes() {
-        match b {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(char::from(b)),
-            _ => {
-                let _ = write!(out, "%{b:02X}");
-            }
-        }
-    }
-    out
+    capri_domain::spotify::search_uri(query)
 }
 
 fn run(cmd: &MediaCommand) -> Result<(), String> {
     match cmd {
         MediaCommand::OpenSpotify => open("spotify:"),
         MediaCommand::Search(q) => open(&spotify_search_uri(q)),
+        MediaCommand::Shuffle | MediaCommand::Repeat | MediaCommand::Like | MediaCommand::NowPlaying => {
+            Err("that needs Spotify's own buttons: open Spotify first".into())
+        }
         other => key(other),
     }
 }
@@ -60,7 +53,12 @@ fn key(cmd: &MediaCommand) -> Result<(), String> {
         MediaCommand::VolumeUp => ("pactl", &["set-sink-volume", "@DEFAULT_SINK@", "+8%"]),
         MediaCommand::VolumeDown => ("pactl", &["set-sink-volume", "@DEFAULT_SINK@", "-8%"]),
         MediaCommand::Mute => ("pactl", &["set-sink-mute", "@DEFAULT_SINK@", "toggle"]),
-        MediaCommand::OpenSpotify | MediaCommand::Search(_) => unreachable!("handled by open"),
+        MediaCommand::OpenSpotify
+        | MediaCommand::Search(_)
+        | MediaCommand::Shuffle
+        | MediaCommand::Repeat
+        | MediaCommand::Like
+        | MediaCommand::NowPlaying => unreachable!("handled by run"),
     };
     let status = std::process::Command::new(program).args(args).status().map_err(|e| format!("{program}: {e}"))?;
     if status.success() { Ok(()) } else { Err(format!("{program} failed ({status})")) }
@@ -77,13 +75,13 @@ impl Tool for MediaKeys {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: MEDIA_TOOL.into(),
-            description: "Control music playback: play, pause, next, previous, volume, open Spotify, search Spotify."
+            description: "Control music in any player through the system media keys: play, pause, next, \
+                previous, and the system volume. For Spotify prefer the spotify tool."
                 .into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": ["play_pause", "play", "pause", "next", "previous", "volume_up", "volume_down", "mute", "open_spotify", "search"] },
-                    "query": { "type": "string", "description": "what to look up, for action=search" }
+                    "action": { "type": "string", "enum": ["play_pause", "play", "pause", "next", "previous", "volume_up", "volume_down", "mute"] }
                 },
                 "required": ["action"]
             }),
