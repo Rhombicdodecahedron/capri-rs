@@ -17,6 +17,12 @@ impl Lines {
             let line = line.trim_end_matches(['\r', '\n']);
             if let Some(data) = line.strip_prefix("data:") {
                 out.push(data.trim_start().to_string());
+            } else if let Some(err) = line.strip_prefix("error:") {
+                // llama-server reports failures inside a stream on an `error:` line
+                let err = err.trim_start();
+                let payload =
+                    if err.starts_with('{') { err.to_string() } else { serde_json::Value::from(err).to_string() };
+                out.push(format!("{{\"error\":{payload}}}"));
             }
         }
         out
@@ -40,6 +46,13 @@ mod tests {
         let bytes = "data: é\n".as_bytes();
         assert_eq!(l.push(&bytes[..7]), Vec::<String>::new());
         assert_eq!(l.push(&bytes[7..]), vec!["é"]);
+    }
+
+    #[test]
+    fn keeps_llama_server_error_lines() {
+        let mut l = Lines::default();
+        let out = l.push(b"error: {\"code\":500,\"message\":\"roles must alternate\"}\n");
+        assert_eq!(out, vec![r#"{"error":{"code":500,"message":"roles must alternate"}}"#]);
     }
 
     #[test]

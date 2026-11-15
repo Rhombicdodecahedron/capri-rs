@@ -156,6 +156,7 @@ impl ChatService {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!(error = %e, model = %self.model_name(), "reply failed");
+                self.conversation.lock().await.drop_unanswered();
                 emit(ChatEvent::Failed(ChatFailure::from(&e)));
                 return;
             }

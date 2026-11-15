@@ -74,18 +74,83 @@ struct ModelEntry {
 struct Chunk {
     #[serde(default)]
     choices: Vec<Choice>,
+    /// Some servers report a failure mid-stream as a JSON error object.
+    #[serde(default)]
+    error: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
 struct Choice {
     #[serde(default)]
     delta: Delta,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
 struct Delta {
     #[serde(default)]
     content: Option<String>,
+    /// llama-server, vLLM and DeepSeek put a reasoning model's thinking here.
+    #[serde(default, alias = "reasoning")]
+    reasoning_content: Option<String>,
+}
+
+/// What the stream carried besides visible text, to explain an empty answer.
+#[derive(Debug, Default)]
+struct Tally {
+    said: bool,
+    reasoning_chars: usize,
+    finish: Option<String>,
+    error: Option<String>,
+}
+
+impl Tally {
+    /// The error for a stream that ended without a visible word.
+    fn empty_reply(&self, max_tokens: Option<u32>) -> LlmError {
+        if let Some(e) = &self.error {
+            return LlmError::Backend(e.clone());
+        }
+        let budget = max_tokens.map_or_else(String::new, |m| format!(" ({m} tokens)"));
+        match (self.reasoning_chars, self.finish.as_deref()) {
+            (r, Some("length")) if r > 0 => LlmError::Backend(format!(
+                "the model spent its whole budget{budget} thinking and never answered: raise the max reply length, \
+                 or use a model or server option that turns thinking off"
+            )),
+            (r, _) if r > 0 => LlmError::Backend("the model only thought and gave no answer".into()),
+            (_, Some("length")) => LlmError::Backend(format!("the model hit the length limit{budget} before any text")),
+            _ => LlmError::Backend("empty reply".into()),
+        }
+    }
+}
+
+/// One SSE payload: the visible text it carries, after updating the tally.
+fn absorb(data: &str, tally: &mut Tally, think: &mut ThinkFilter) -> Option<String> {
+    if data == "[DONE]" {
+        return None;
+    }
+    let parsed: Chunk = serde_json::from_str(data).ok()?;
+    if let Some(e) = parsed.error {
+        tally.error = Some(e.get("message").and_then(|m| m.as_str()).map_or_else(|| e.to_string(), str::to_string));
+    }
+    let mut text = String::new();
+    for c in parsed.choices {
+        if let Some(r) = c.delta.reasoning_content {
+            tally.reasoning_chars += r.len();
+        }
+        if let Some(t) = c.delta.content {
+            text.push_str(&t);
+        }
+        if c.finish_reason.is_some() {
+            tally.finish = c.finish_reason;
+        }
+    }
+    let visible = think.feed(&text);
+    if visible.trim().is_empty() {
+        return None;
+    }
+    tally.said = true;
+    Some(visible)
 }
 
 impl OpenAiCompatible {
@@ -204,28 +269,31 @@ impl LanguageModel for OpenAiCompatible {
         let bytes = resp.bytes_stream();
         let mut lines = sse::Lines::default();
         let mut think = ThinkFilter::default();
-        let stream = bytes
+        let tally = std::sync::Arc::new(std::sync::Mutex::new(Tally::default()));
+        let seen = tally.clone();
+        let max_tokens = self.cfg.max_tokens;
+        let body = bytes
             .map(move |chunk| -> Vec<Result<String, LlmError>> {
                 let chunk = match chunk {
                     Ok(c) => c,
                     Err(e) => return vec![Err(LlmError::Interrupted(e.to_string()))],
                 };
-                lines
-                    .push(&chunk)
-                    .into_iter()
-                    .filter_map(|data| {
-                        if data == "[DONE]" {
-                            return None;
-                        }
-                        let parsed: Chunk = serde_json::from_str(&data).ok()?;
-                        let text = parsed.choices.into_iter().filter_map(|c| c.delta.content).collect::<String>();
-                        let visible = think.feed(&text);
-                        (!visible.is_empty()).then_some(Ok(visible))
-                    })
-                    .collect()
+                let mut t = seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                lines.push(&chunk).into_iter().filter_map(|data| absorb(&data, &mut t, &mut think).map(Ok)).collect()
             })
             .flat_map(futures::stream::iter);
-        Ok(Box::pin(stream))
+        // when the stream ends without a visible word, say why instead of returning nothing
+        let end = futures::stream::once(async move {
+            let t = tally.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if t.said {
+                None
+            } else {
+                tracing::warn!(reasoning_chars = t.reasoning_chars, finish = ?t.finish, error = ?t.error, "empty reply");
+                Some(Err(t.empty_reply(max_tokens)))
+            }
+        })
+        .filter_map(futures::future::ready);
+        Ok(Box::pin(body.chain(end)))
     }
 }
 
@@ -257,6 +325,40 @@ mod tests {
         let body = build_body(&OpenAiConfig::new("http://x/v1"), "Qwen3-14B-Q4_K_M.gguf", &chat());
         assert!(body["messages"][1]["content"].as_str().unwrap().ends_with("/no_think"));
         assert!(body.get("chat_template_kwargs").is_none(), "no unknown fields for strict servers");
+    }
+
+    fn run(payloads: &[&str]) -> (String, Tally) {
+        let mut tally = Tally::default();
+        let mut think = ThinkFilter::default();
+        let text = payloads.iter().filter_map(|p| absorb(p, &mut tally, &mut think)).collect();
+        (text, tally)
+    }
+
+    #[test]
+    fn explains_a_reply_lost_to_thinking() {
+        let (text, t) = run(&[
+            r#"{"choices":[{"delta":{"reasoning_content":"Let me think about how to greet"}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#,
+            "[DONE]",
+        ]);
+        assert_eq!(text, "");
+        assert!(t.empty_reply(Some(400)).to_string().contains("whole budget (400 tokens) thinking"));
+    }
+
+    #[test]
+    fn surfaces_errors_sent_mid_stream() {
+        let (_, t) = run(&[r#"{"error":{"message":"context size exceeded"}}"#]);
+        assert!(t.empty_reply(None).to_string().contains("context size exceeded"));
+    }
+
+    #[test]
+    fn counts_visible_text() {
+        let (text, t) = run(&[
+            r#"{"choices":[{"delta":{"content":"Salut"}}]}"#,
+            r#"{"choices":[{"delta":{"content":" choom"},"finish_reason":"stop"}]}"#,
+        ]);
+        assert_eq!(text, "Salut choom");
+        assert!(t.said);
     }
 
     #[test]

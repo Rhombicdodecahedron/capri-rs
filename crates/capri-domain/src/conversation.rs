@@ -103,8 +103,25 @@ impl Conversation {
         }
         let mut out = Vec::with_capacity(self.turns.len() + 1);
         out.push(Message::system(system));
-        out.extend(self.turns.iter().cloned());
+        // Many chat templates (Gemma, Mistral, Llama 2) reject two turns of the same role in a row:
+        // merge them, so a reply that failed earlier never breaks the next one.
+        for t in &self.turns {
+            match out.last_mut() {
+                Some(last) if last.role == t.role && last.role != Role::System => {
+                    last.content.push_str("\n\n");
+                    last.content.push_str(&t.content);
+                }
+                _ => out.push(t.clone()),
+            }
+        }
         out
+    }
+
+    /// Drops the last turn if it is the user's (their message got no reply).
+    pub fn drop_unanswered(&mut self) {
+        if self.turns.last().is_some_and(|m| m.role == Role::User) {
+            self.turns.pop();
+        }
     }
 }
 
@@ -121,6 +138,25 @@ mod tests {
         }
         assert!(c.turns().len() <= 3);
         assert_eq!(c.turns()[0].role, Role::User);
+    }
+
+    #[test]
+    fn prompt_alternates_roles() {
+        let mut c = Conversation::new(Persona::default(), 10);
+        c.push(Message::user("hi"));
+        c.push(Message::user("hello?"));
+        c.push(Message::assistant("hey"));
+        let p = c.prompt(&[]);
+        assert_eq!(p.iter().map(|m| m.role).collect::<Vec<_>>(), [Role::System, Role::User, Role::Assistant]);
+        assert_eq!(p[1].content, "hi\n\nhello?");
+    }
+
+    #[test]
+    fn unanswered_turn_is_dropped() {
+        let mut c = Conversation::new(Persona::default(), 10);
+        c.push(Message::user("hi"));
+        c.drop_unanswered();
+        assert_eq!(c.turns(), &[] as &[Message]);
     }
 
     #[test]
