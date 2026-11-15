@@ -154,6 +154,9 @@ pub struct Brain {
     pub max_tokens: Option<u32>,
     /// Let reasoning models (Qwen3, DeepSeek-R1...) think before answering. Slower first word.
     pub thinking: bool,
+    /// Let the model call her tools (music, apps, the web, driving windows). llama-server needs
+    /// `--jinja` for this; servers that refuse are detected and get plain chat.
+    pub tools: bool,
 }
 
 impl Default for Brain {
@@ -167,6 +170,7 @@ impl Default for Brain {
             temperature: Some(0.8),
             max_tokens: Some(400),
             thinking: false,
+            tools: true,
         }
     }
 }
@@ -252,10 +256,21 @@ impl PersonaSection {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Safety {
     pub approval: ApprovalMode,
+    /// Let her drive other apps' windows (read their buttons, click, type, press keys).
+    pub app_control: bool,
+    /// Words in a window's title or program name that keep her eyes and hands off it, on top of the
+    /// built-in list (password managers, banking, private browsing, sign-in prompts).
+    pub never_touch: Vec<String>,
+}
+
+impl Default for Safety {
+    fn default() -> Self {
+        Self { approval: ApprovalMode::Ask, app_control: true, never_touch: Vec::new() }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -358,6 +373,8 @@ model = "qwen3:8b"
 temperature = 0.8
 max_tokens = 400
 thinking = false
+# let the model use her tools (llama-server needs --jinja)
+tools = true
 
 [claude_code]
 # executable = "C:/Users/you/AppData/Roaming/npm/claude.cmd"
@@ -379,6 +396,10 @@ fps = 60
 [safety]
 # ask | auto | read_only
 approval = "ask"
+# drive other apps: read their buttons, click, type (never password managers, banking, private tabs)
+app_control = true
+# more windows to keep off limits, by words in their title or program name
+never_touch = []
 
 [ui]
 # auto | en | fr  (she always answers in the language you write in)
@@ -413,7 +434,8 @@ mod tests {
         let c: Config = toml::from_str(DEFAULT_CONFIG).unwrap();
         assert_eq!(c.brain.engine, Engine::Ollama);
         assert_eq!(c.desk.skin, "capri");
-        assert_eq!(c.safety.approval, ApprovalMode::Ask);
+        assert_eq!(c.safety, Safety::default());
+        assert!(c.brain.tools);
     }
 
     #[test]

@@ -58,6 +58,8 @@ pub struct Panel {
     key_source: KeySource,
     show_key: bool,
     custom_prompt: bool,
+    /// The never-touch list as typed (commas), so a trailing comma survives while typing.
+    never_touch: String,
     test: Arc<Mutex<Option<TestState>>>,
     status: Option<(String, bool)>,
     load_error: Option<String>,
@@ -88,6 +90,7 @@ impl Panel {
             KeySource::None
         };
         let custom_prompt = cfg.persona.prompt.is_some();
+        let never_touch = cfg.safety.never_touch.join(", ");
         Self {
             input,
             saved: cfg.clone(),
@@ -96,6 +99,7 @@ impl Panel {
             key_source,
             show_key: false,
             custom_prompt,
+            never_touch,
             test: Arc::new(Mutex::new(None)),
             status: None,
             load_error,
@@ -604,6 +608,13 @@ impl Panel {
             );
             ui.add_space(4.0);
             ui.checkbox(
+                &mut self.cfg.brain.tools,
+                t(
+                    "Let the model use her tools (music, apps, web, your windows). llama-server needs --jinja",
+                    "Laisser le modèle utiliser ses outils (musique, apps, web, tes fenêtres). llama-server demande --jinja",
+                ),
+            );
+            ui.checkbox(
                 &mut self.cfg.brain.thinking,
                 t(
                     "Let reasoning models think first (slower first word)",
@@ -818,10 +829,36 @@ impl Panel {
             hint(
                 ui,
                 t(
-                    "Text from the model or a web page can ask for an action, never approve one.",
-                    "Un texte venant du modèle ou d'une page web peut demander une action, jamais la valider.",
+                    "Text from the model or a web page can ask for an action, never approve one. She asks in the chat: answer yes or no.",
+                    "Un texte venant du modèle ou d'une page web peut demander une action, jamais la valider. Elle demande dans le chat : réponds oui ou non.",
                 ),
             );
+        });
+        section(ui, t("YOUR APPS", "TES APPLIS"), |ui| {
+            ui.checkbox(
+                &mut self.cfg.safety.app_control,
+                t(
+                    "Let her drive other apps: read their buttons, click, type, press keys",
+                    "La laisser piloter tes applis : lire leurs boutons, cliquer, écrire, appuyer sur des touches",
+                ),
+            );
+            hint(
+                ui,
+                t(
+                    "She presses buttons through Windows accessibility, like a screen reader. Buttons that delete, send or pay always ask first. Password managers, banking, private tabs and sign-in windows are always off limits.",
+                    "Elle appuie sur les boutons via l'accessibilité de Windows, comme un lecteur d'écran. Les boutons qui suppriment, envoient ou paient demandent toujours. Gestionnaires de mots de passe, banques, onglets privés et fenêtres de connexion lui sont toujours interdits.",
+                ),
+            );
+            label(
+                ui,
+                t("ALSO KEEP OFF (WORDS IN A WINDOW TITLE, COMMAS)", "INTERDIRE AUSSI (MOTS DANS LE TITRE, VIRGULES)"),
+            );
+            let edit =
+                egui::TextEdit::singleline(&mut self.never_touch).desired_width(480.0).hint_text("journal, outlook");
+            if ui.add(edit).changed() {
+                self.cfg.safety.never_touch =
+                    self.never_touch.split(',').map(str::trim).filter(|w| !w.is_empty()).map(str::to_string).collect();
+            }
         });
     }
 

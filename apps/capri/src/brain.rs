@@ -69,6 +69,7 @@ pub fn build(b: &BrainCfg, cc: &ClaudeCodeSection) -> anyhow::Result<Brain> {
     oc.temperature = b.temperature.map(|t| t as f32);
     oc.max_tokens = b.max_tokens;
     oc.thinking = b.thinking;
+    oc.tools = b.tools;
     Ok(Brain::OpenAi(Arc::new(OpenAiCompatible::new(oc))))
 }
 
