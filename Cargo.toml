@@ -11,6 +11,7 @@ members = [
     "adapters/memory-sqlite",
     "adapters/desk-winit",
     "adapters/settings-egui",
+    "apps/capri",
 ]
 
 [workspace.package]

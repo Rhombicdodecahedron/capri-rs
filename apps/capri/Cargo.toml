@@ -1,0 +1,38 @@
+[package]
+name = "capri"
+description = "Capri: a cyberpunk AI companion for your desktop. Composition root: wires adapters into services."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+default-run = "capri"
+
+[[bin]]
+name = "capri"
+path = "src/main.rs"
+
+[dependencies]
+capri-domain = { workspace = true }
+capri-application = { workspace = true }
+capri-config = { workspace = true }
+capri-llm-openai = { workspace = true }
+capri-llm-claude-code = { workspace = true }
+capri-skin-fs = { workspace = true }
+capri-desktop-windows = { workspace = true }
+capri-memory-sqlite = { workspace = true }
+capri-desk-winit = { workspace = true }
+capri-settings-egui = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+clap = { workspace = true }
+directories = { workspace = true }
+futures = { workspace = true }
+sys-locale = "0.3"
+tiny-skia = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true
