@@ -4,6 +4,8 @@ members = [
     "crates/capri-domain",
     "crates/capri-application",
     "crates/capri-config",
+    "adapters/llm-openai",
+    "adapters/llm-claude-code",
 ]
 
 [workspace.package]
@@ -17,6 +19,8 @@ repository = "https://github.com/Rhombicdodecahedron/capri-rs"
 capri-domain = { path = "crates/capri-domain" }
 capri-application = { path = "crates/capri-application" }
 capri-config = { path = "crates/capri-config" }
+capri-llm-openai = { path = "adapters/llm-openai" }
+capri-llm-claude-code = { path = "adapters/llm-claude-code" }
 
 anyhow = "1"
 async-trait = "0.1"
