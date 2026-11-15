@@ -318,7 +318,7 @@ mod tests {
         assert!(out.contains("language = \"fr\""));
         let back: Config = toml::from_str(&out).unwrap();
         assert_eq!(back.brain.engine, Engine::LlamaServer);
-        assert!(back.brain.model.is_empty());
+        assert_eq!(back.brain.model, "");
     }
 
     #[test]
