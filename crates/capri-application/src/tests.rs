@@ -1,5 +1,7 @@
 //! Service tests with in-memory fakes: no network, no disk, no windows.
 
+mod powers;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
